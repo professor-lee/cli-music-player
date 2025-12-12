@@ -1,0 +1,23 @@
+/target/
+**/*.rs.bk
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+
+# VS Code
+.vscode/
+
+# Rustfmt / clippy caches (if any)
+.rustc_info.json
+
+# process file
+Prd.md
+product_roadmap_v1.md
+tech_architecture_doc.md
+architecture_blueprint.mermaid
+/参考/

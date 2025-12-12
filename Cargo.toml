@@ -1,0 +1,44 @@
+[package]
+name = "cli-music-player"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+# Optional: download + build upstream `cava` from source during Cargo build.
+# Requires network access and system build dependencies (see README).
+bundle-cava = []
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+
+ratatui = "0.26"
+crossterm = "0.27"
+
+rodio = "0.17"
+symphonia = { version = "0.5", features = ["aac", "alac", "flac", "isomp4", "mp3", "ogg", "wav", "vorbis"] }
+cpal = "0.15"
+rustfft = "6.1"
+
+lofty = "0.18"
+image = "0.24"
+unicode-width = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris = "2.0"
+alsa = "0.9"
+
+[build-dependencies]
+anyhow = "1"
+flate2 = "1"
+tar = "0.4"
+ureq = "2"
+
+[profile.release]
+codegen-units = 8
+lto = "thin"

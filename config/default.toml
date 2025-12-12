@@ -1,0 +1,6 @@
+theme = "mocha"
+ui_fps = 60
+spectrum_hz = 30
+mpris_poll_ms = 100
+transparent_background = false
+album_border = false
