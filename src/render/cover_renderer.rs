@@ -1,6 +1,6 @@
 use image::imageops::FilterType;
 
-pub const COVER_CHARSET: &str = "▀▔▄▁▂▃▅▆▇█▌▐▖▗▘▙▚▛▜▝▞▟▉▊▋███████░▒▓█";
+pub const COVER_CHARSET: &str = "⠀░▒▓█";
 
 pub fn render_cover_ascii(image_bytes: &[u8], width: u16, height: u16) -> Option<String> {
     let img = image::load_from_memory(image_bytes).ok()?;

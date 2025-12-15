@@ -4,7 +4,8 @@ pub struct FftEngine {
     fft_size: usize,
     window: Vec<f32>,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
-    scratch: Vec<Complex<f32>>,
+    buf: Vec<Complex<f32>>,
+    mags: Vec<f32>,
 }
 
 impl FftEngine {
@@ -12,26 +13,29 @@ impl FftEngine {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(fft_size);
         let window = hann_window(fft_size);
-        let scratch = vec![Complex::new(0.0, 0.0); fft_size];
-        Self { fft_size, window, fft, scratch }
+        let buf = vec![Complex::new(0.0, 0.0); fft_size];
+        let mags = vec![0.0f32; fft_size / 2];
+        Self { fft_size, window, fft, buf, mags }
     }
 
-    pub fn magnitudes(&mut self, input: &[f32]) -> Vec<f32> {
-        let mut buf: Vec<Complex<f32>> = Vec::with_capacity(self.fft_size);
+    pub fn magnitudes(&mut self, input: &[f32]) -> &[f32] {
+        // window + copy into reusable complex buffer
         for i in 0..self.fft_size {
             let x = input.get(i).copied().unwrap_or(0.0) * self.window[i];
-            buf.push(Complex::new(x, 0.0));
+            self.buf[i] = Complex::new(x, 0.0);
         }
 
-        self.fft.process(&mut buf);
+        self.fft.process(&mut self.buf);
 
-        // take first half
+        // take first half magnitudes into reusable buffer
         let half = self.fft_size / 2;
-        let mut mags = vec![0.0f32; half];
-        for i in 0..half {
-            mags[i] = buf[i].norm();
+        if self.mags.len() != half {
+            self.mags.resize(half, 0.0);
         }
-        mags
+        for i in 0..half {
+            self.mags[i] = self.buf[i].norm();
+        }
+        &self.mags
     }
 }
 

@@ -38,7 +38,6 @@ pub fn run(app: &mut AppState) -> Result<()> {
 
     let system_volume = SystemVolume::try_new().ok();
 
-    let frame_dt = fps_to_dt(app.config.ui_fps);
     let mut last_spectrum = Instant::now();
     let mut last_mpris = Instant::now();
 
@@ -139,6 +138,11 @@ pub fn run(app: &mut AppState) -> Result<()> {
 
         // local player position update
         if app.player.mode == PlayMode::LocalPlayback {
+            // Detect end-of-track and stop position accumulation.
+            let just_finished = mode_manager.local.poll_end();
+            if just_finished {
+                handle_local_track_finished(app, &mut mode_manager);
+            }
             if let Some(pos) = mode_manager.local.position() {
                 app.player.position = pos;
             }
@@ -163,6 +167,7 @@ pub fn run(app: &mut AppState) -> Result<()> {
         last_layout = tui.draw(app)?;
 
         // frame pacing
+        let frame_dt = fps_to_dt(app.config.ui_fps);
         let elapsed = frame_start.elapsed();
         if elapsed < frame_dt {
             std::thread::sleep(frame_dt - elapsed);
@@ -181,6 +186,48 @@ pub fn run(app: &mut AppState) -> Result<()> {
 fn fps_to_dt(fps: u32) -> Duration {
     let fps = fps.clamp(30, 60);
     Duration::from_millis((1000 / fps) as u64)
+}
+
+fn handle_local_track_finished(app: &mut AppState, mode_manager: &mut ModeManager) {
+    // 自动续播仅用于本地播放。
+    if app.player.mode != PlayMode::LocalPlayback {
+        return;
+    }
+    if app.playlist.items.is_empty() {
+        return;
+    }
+
+    let from = CoverSnapshot::from(&app.player.track);
+    let next = match app.player.repeat_mode {
+        RepeatMode::Sequence => app.playlist.next_index_no_wrap(),
+        RepeatMode::LoopAll => app.playlist.next_index_sequence(),
+        RepeatMode::LoopOne => app.playlist.current,
+        RepeatMode::Shuffle => pick_shuffle_index(&app.playlist),
+    };
+
+    let Some(i) = next else {
+        // Sequence mode at end: stop.
+        app.player.playback = PlaybackState::Stopped;
+        return;
+    };
+
+    app.playlist.current = Some(i);
+    let Some(path) = app.playlist.current_path().cloned() else {
+        app.player.playback = PlaybackState::Stopped;
+        return;
+    };
+
+    match mode_manager.local.play_file(&path) {
+        Ok(track) => {
+            app.player.track = track;
+            let to = CoverSnapshot::from(&app.player.track);
+            app.start_cover_anim(from, to, -1, Instant::now());
+        }
+        Err(e) => {
+            app.player.playback = PlaybackState::Stopped;
+            app.set_toast(format!("Play error: {e}"));
+        }
+    }
 }
 
 fn handle_action(
@@ -204,6 +251,32 @@ fn handle_action(
         }
         Action::OpenHelpModal => {
             app.overlay = Overlay::HelpModal;
+        }
+        Action::OpenEqModal => {
+            // 需求：均衡器仅对本地音频播放生效
+            if app.player.mode == PlayMode::LocalPlayback {
+                app.overlay = Overlay::EqModal;
+                app.eq_selected = 0;
+            } else {
+                app.set_toast("EQ only for local playback");
+            }
+        }
+        Action::EqSetBandDb { band, db } => {
+            if app.overlay == Overlay::EqModal {
+                app.eq_selected = band.min(2);
+                let db = db.clamp(-12.0, 12.0);
+                match app.eq_selected {
+                    0 => app.eq.low_db = db,
+                    1 => app.eq.mid_db = db,
+                    2 => app.eq.high_db = db,
+                    _ => {}
+                }
+
+                // 需求：均衡器自动生效
+                if app.player.mode == PlayMode::LocalPlayback {
+                    let _ = mode_manager.local.set_eq(app.eq);
+                }
+            }
         }
         Action::FolderChar(c) => {
             app.folder_input.buf.push(c);
@@ -280,6 +353,9 @@ fn handle_action(
                 Overlay::HelpModal => {
                     app.close_overlay();
                 }
+                Overlay::EqModal => {
+                    app.close_overlay();
+                }
                 _ => {}
             }
         }
@@ -293,28 +369,64 @@ fn handle_action(
         }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 3;
+                let count = 4;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
+            } else if app.overlay == Overlay::EqModal {
+                let step = 1.0;
+                match app.eq_selected {
+                    0 => app.eq.low_db = (app.eq.low_db + step).clamp(-12.0, 12.0),
+                    1 => app.eq.mid_db = (app.eq.mid_db + step).clamp(-12.0, 12.0),
+                    2 => app.eq.high_db = (app.eq.high_db + step).clamp(-12.0, 12.0),
+                    _ => {}
+                }
+
+                // 需求：均衡器自动生效
+                if app.player.mode == PlayMode::LocalPlayback {
+                    let _ = mode_manager.local.set_eq(app.eq);
+                }
             }
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 3;
+                let count = 4;
                 app.settings_selected = (app.settings_selected + 1) % count;
+            } else if app.overlay == Overlay::EqModal {
+                let step = 1.0;
+                match app.eq_selected {
+                    0 => app.eq.low_db = (app.eq.low_db - step).clamp(-12.0, 12.0),
+                    1 => app.eq.mid_db = (app.eq.mid_db - step).clamp(-12.0, 12.0),
+                    2 => app.eq.high_db = (app.eq.high_db - step).clamp(-12.0, 12.0),
+                    _ => {}
+                }
+
+                // 需求：均衡器自动生效
+                if app.player.mode == PlayMode::LocalPlayback {
+                    let _ = mode_manager.local.set_eq(app.eq);
+                }
             }
         }
         Action::ModalLeft => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, -1);
+            } else if app.overlay == Overlay::EqModal {
+                let count = 3;
+                if app.eq_selected == 0 {
+                    app.eq_selected = count - 1;
+                } else {
+                    app.eq_selected -= 1;
+                }
             }
         }
         Action::ModalRight => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, 1);
+            } else if app.overlay == Overlay::EqModal {
+                let count = 3;
+                app.eq_selected = (app.eq_selected + 1) % count;
             }
         }
         Action::PlaylistSelect(idx) => {
@@ -339,7 +451,19 @@ fn handle_action(
         Action::TogglePlayPause => {
             match app.player.mode {
                 PlayMode::LocalPlayback => {
-                    let _ = mode_manager.local.toggle_play_pause();
+                    // If the track finished (sink empty), Space should restart it.
+                    if mode_manager.local.playback_state() == PlaybackState::Stopped {
+                        if let Ok(Some(track)) = mode_manager.local.restart_current() {
+                            app.player.track = track;
+                        }
+                    } else {
+                        let _ = mode_manager.local.toggle_play_pause();
+                    }
+
+                    // Keep UI position in sync immediately (avoids visual jump on key press).
+                    if let Some(pos) = mode_manager.local.position() {
+                        app.player.position = pos;
+                    }
                 }
                 PlayMode::SystemMonitor => {
                     let _ = mode_manager.mpris.toggle_play_pause();
@@ -351,8 +475,10 @@ fn handle_action(
             PlayMode::LocalPlayback => {
                 let from = CoverSnapshot::from(&app.player.track);
                 let i = match app.player.repeat_mode {
+                    RepeatMode::Sequence => app.playlist.prev_index_no_wrap(),
+                    RepeatMode::LoopAll => app.playlist.prev_index_sequence(),
+                    RepeatMode::LoopOne => app.playlist.current,
                     RepeatMode::Shuffle => pick_shuffle_index(&app.playlist),
-                    _ => app.playlist.prev_index_sequence(),
                 };
                 if let Some(i) = i {
                     app.playlist.current = Some(i);
@@ -375,7 +501,8 @@ fn handle_action(
             PlayMode::LocalPlayback => {
                 let from = CoverSnapshot::from(&app.player.track);
                 let next = match app.player.repeat_mode {
-                    RepeatMode::Sequence | RepeatMode::LoopAll => app.playlist.next_index_sequence(),
+                    RepeatMode::Sequence => app.playlist.next_index_no_wrap(),
+                    RepeatMode::LoopAll => app.playlist.next_index_sequence(),
                     RepeatMode::LoopOne => app.playlist.current,
                     RepeatMode::Shuffle => pick_shuffle_index(&app.playlist),
                 };
@@ -452,7 +579,10 @@ fn handle_action(
             PlayMode::Idle => {}
         },
         Action::ToggleRepeatMode => {
-            app.player.repeat_mode = app.player.repeat_mode.next();
+            // 需求：循环模式仅对本地音频有效；系统(MPRIS)来源固定显示“顺序(⇔)”且不受 m 影响。
+            if app.player.mode == PlayMode::LocalPlayback {
+                app.player.repeat_mode = app.player.repeat_mode.next();
+            }
         }
         Action::SeekToFraction(r) => {
             let dur = app.player.track.duration;
@@ -462,7 +592,10 @@ fn handle_action(
             let target = Duration::from_secs_f32(dur.as_secs_f32() * r.clamp(0.0, 1.0));
             match app.player.mode {
                 PlayMode::LocalPlayback => {
-                    let _ = mode_manager.local.seek(target);
+                    if mode_manager.local.seek(target).is_ok() {
+                        // Update UI immediately so the next user action (e.g. Space) doesn't look like a jump.
+                        app.player.position = target;
+                    }
                 }
                 PlayMode::SystemMonitor => {
                     let _ = mode_manager.mpris.seek_to(target);
@@ -472,7 +605,7 @@ fn handle_action(
         }
         Action::MouseClick { col, row } => {
             // map click to controls/progress/volume/playlist
-            if let Some(a) = crate::ui::tui::hit_test(layout, col, row) {
+            if let Some(a) = crate::ui::tui::hit_test(layout, app, col, row) {
                 handle_action(app, mode_manager, system_volume, a, layout)?;
             }
         }
@@ -546,6 +679,13 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
         2 => {
             if delta != 0 {
                 app.config.album_border = !app.config.album_border;
+                let _ = app.config.save();
+            }
+        }
+        // UI FPS
+        3 => {
+            if delta != 0 {
+                app.config.ui_fps = if app.config.ui_fps >= 60 { 30 } else { 60 };
                 let _ = app.config.save();
             }
         }

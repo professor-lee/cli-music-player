@@ -1,6 +1,6 @@
-theme = "frappe"
+theme = "mocha"
 ui_fps = 30
 spectrum_hz = 30
 mpris_poll_ms = 100
-transparent_background = true
+transparent_background = false
 album_border = false

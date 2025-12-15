@@ -1,0 +1,8 @@
+name = "frappe"
+text = "#C6D0F5"
+subtext = "#A5ADCE"
+base = "#303446"
+surface = "#414559"
+accent = "#8CAAEE"
+accent2 = "#A6D189"
+accent3 = "#E78284"

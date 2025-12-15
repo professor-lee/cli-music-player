@@ -1,0 +1,8 @@
+name = "system"
+text = "#FFFFFF"
+subtext = "#AAAAAA"
+base = "#000000"
+surface = "#111111"
+accent = "#FFFFFF"
+accent2 = "#FFFFFF"
+accent3 = "#FFFFFF"

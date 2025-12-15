@@ -1,5 +1,6 @@
 use crate::app::state::{AppState, Overlay};
 use crate::ui::panels::{info_panel, playlist_panel, visual_panel};
+use crate::ui::components::control_buttons;
 use crate::utils::input::Action;
 use anyhow::Result;
 use crossterm::execute;
@@ -195,6 +196,7 @@ impl Tui {
             match app.overlay {
                 Overlay::SettingsModal => render_settings_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app),
+                Overlay::EqModal => render_eq_modal(f, size, app),
                 _ => {}
             }
         })?;
@@ -215,7 +217,7 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    let area = centered_rect(size, 44, 9);
+    let area = centered_rect(size, 44, 10);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -241,6 +243,7 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
             if app.config.transparent_background { "On" } else { "Off" }
         ),
         format!("Album border: {}", if app.config.album_border { "On" } else { "Off" }),
+        format!("UI FPS: {}", if app.config.ui_fps >= 60 { 60 } else { 30 }),
     ];
 
     for (idx, text) in items.iter().enumerate() {
@@ -290,7 +293,8 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         "Space     Play/Pause",
         "Left/Right Prev/Next",
         "Up/Down   Volume",
-        "M         Repeat mode",
+        "M         Repeat mode (Local)",
+        "E         Equalizer (Local)",
         "T         Settings",
         "Ctrl+K    This help",
         "Q         Quit",
@@ -304,18 +308,329 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     f.render_widget(p, inner);
 }
 
-pub fn hit_test(layout: &UiLayout, col: u16, row: u16) -> Option<Action> {
+fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+    // 需求：柱状条宽 2 格，高度 +12/-12（含 0 行共 25）
+    // 额外预留：顶部提示 1 行 + 底部数值 1 行
+    let area = centered_rect(size, 44, 31);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+            .border_set(crate::ui::borders::SOLID_BORDER)
+        .title("Equalizer (Local)")
+        .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()));
+    f.render_widget(block, area);
+
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+    let bg = Style::default().bg(app.theme.color_surface());
+    let sub = Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface());
+    let text = Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface());
+    let selected_bg = Style::default()
+        .fg(app.theme.color_base())
+        .bg(app.theme.color_accent())
+        .add_modifier(Modifier::BOLD);
+
+    // layout inside modal
+    if inner.height < 3 {
+        return;
+    }
+    let hint_rect = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    let label_rect = Rect {
+        x: inner.x,
+        y: inner.y + inner.height - 1,
+        width: inner.width,
+        height: 1,
+    };
+    let bars_rect = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+
+    f.render_widget(
+        Paragraph::new("Click/Up/Down adjust (auto)  Esc close")
+            .style(sub)
+            .wrap(Wrap { trim: true }),
+        hint_rect,
+    );
+
+    // compute band geometry
+    const BANDS: usize = 3;
+    const BAR_W: u16 = 2;
+    const GAP: u16 = 2;
+
+    fn fmt_db2(v: f32) -> String {
+        let i = v.clamp(-12.0, 12.0).round() as i32;
+        format!("{:+03}", i)
+    }
+
+    let labels = [
+        format!("Low {}dB", fmt_db2(app.eq.low_db)),
+        format!("Mid {}dB", fmt_db2(app.eq.mid_db)),
+        format!("High {}dB", fmt_db2(app.eq.high_db)),
+    ];
+
+    // Column width is based on each label width (so bar is centered relative to its own text).
+    let mut col_w: [u16; BANDS] = [BAR_W; BANDS];
+    for (i, l) in labels.iter().enumerate() {
+        let w = unicode_width::UnicodeWidthStr::width(l.as_str()) as u16;
+        col_w[i] = w.max(BAR_W);
+    }
+
+    let total_w: u16 = col_w.iter().sum::<u16>() + GAP.saturating_mul((BANDS as u16).saturating_sub(1));
+
+    // If too narrow, fall back to fixed columns.
+    let (x0, col_w, gap) = if total_w <= bars_rect.width {
+        (bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2, col_w, GAP)
+    } else {
+        const FALLBACK_GAP: u16 = 8;
+        const FALLBACK_COL_W: u16 = BAR_W + FALLBACK_GAP;
+        let used_w = FALLBACK_COL_W.saturating_mul(BANDS as u16);
+        (
+            bars_rect.x + (bars_rect.width.saturating_sub(used_w)) / 2,
+            [FALLBACK_COL_W; BANDS],
+            0,
+        )
+    };
+
+    // fixed height: 25 rows => +12..0..-12
+    let want_h: u16 = 25;
+    let bars_h = if bars_rect.height >= want_h { want_h } else { bars_rect.height.max(3) };
+    let y0 = bars_rect.y + (bars_rect.height.saturating_sub(bars_h)) / 2;
+
+    let gains = [app.eq.low_db, app.eq.mid_db, app.eq.high_db];
+
+    // helper: map row index to db
+    let row_to_db = |r: i32| -> i32 {
+        if bars_h == want_h {
+            // r: 0..24 => +12..-12
+            12 - r
+        } else {
+            // fallback scale to +/-12
+            let mid = (bars_h as i32) / 2;
+            if r == mid {
+                0
+            } else if r < mid {
+                let level = (mid - r) as f32;
+                let max = mid.max(1) as f32;
+                ((12.0 * (level / max)).round() as i32).clamp(0, 12)
+            } else {
+                let level = (r - mid) as f32;
+                let max = (bars_h as i32 - 1 - mid).max(1) as f32;
+                (-(12.0 * (level / max)).round() as i32).clamp(-12, 0)
+            }
+        }
+    };
+
+    let mut lines: Vec<Line> = Vec::with_capacity(bars_h as usize);
+    for r in 0..bars_h {
+        let rr = r as i32;
+        let db_row = row_to_db(rr);
+
+        let mut spans: Vec<ratatui::text::Span> = Vec::new();
+
+        // left padding
+        if x0 > bars_rect.x {
+            spans.push(ratatui::text::Span::styled(
+                " ".repeat((x0 - bars_rect.x) as usize),
+                bg,
+            ));
+        }
+
+        for b in 0..BANDS {
+            let gain = gains[b].clamp(-12.0, 12.0).round() as i32;
+            let filled = if db_row == 0 {
+                false
+            } else if db_row > 0 {
+                // +1..+12: fill when row <= gain (e.g. gain=3 fills +1..+3)
+                gain > 0 && db_row <= gain
+            } else {
+                // -1..-12: fill when row >= gain (e.g. gain=-5 fills -1..-5)
+                gain < 0 && db_row >= gain
+            };
+
+            // Each column: center the 2-cell bar within its own label-based width.
+            let cw = col_w[b];
+            let left_pad = cw.saturating_sub(BAR_W) / 2;
+            let right_pad = cw.saturating_sub(BAR_W) - left_pad;
+            let mut cell = String::new();
+            cell.push_str(&" ".repeat(left_pad as usize));
+            cell.push_str(if filled { "██" } else { "░░" });
+            cell.push_str(&" ".repeat(right_pad as usize));
+            if b + 1 < BANDS {
+                cell.push_str(&" ".repeat(gap as usize));
+            }
+
+            // 需求：仅去除柱的选中效果（柱体不高亮）
+            spans.push(ratatui::text::Span::styled(cell, text));
+        }
+
+        // right padding
+        let drawn = (col_w.iter().sum::<u16>() + gap.saturating_mul((BANDS as u16).saturating_sub(1)))
+            + (x0 - bars_rect.x);
+        if drawn < bars_rect.width {
+            spans.push(ratatui::text::Span::styled(
+                " ".repeat((bars_rect.width - drawn) as usize),
+                bg,
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    let draw_rect = Rect {
+        x: bars_rect.x,
+        y: y0,
+        width: bars_rect.width,
+        height: bars_h,
+    };
+    f.render_widget(Paragraph::new(lines).style(bg).wrap(Wrap { trim: false }), draw_rect);
+
+    // bottom labels (one line)
+    let mut label_spans: Vec<ratatui::text::Span> = Vec::new();
+    if x0 > bars_rect.x {
+        label_spans.push(ratatui::text::Span::styled(
+            " ".repeat((x0 - bars_rect.x) as usize),
+            bg,
+        ));
+    }
+    for b in 0..BANDS {
+        let cw = col_w[b];
+        let mut s = labels[b].clone();
+        // truncate by display width (best-effort for ASCII)
+        if unicode_width::UnicodeWidthStr::width(s.as_str()) as u16 > cw {
+            s = s.chars().take(cw as usize).collect();
+        }
+        let pad = cw.saturating_sub(unicode_width::UnicodeWidthStr::width(s.as_str()) as u16);
+        let left_pad = pad / 2;
+        let right_pad = pad - left_pad;
+        let mut cell = format!("{}{}{}", " ".repeat(left_pad as usize), s, " ".repeat(right_pad as usize));
+        if b + 1 < BANDS {
+            cell.push_str(&" ".repeat(gap as usize));
+        }
+
+        // 需求：保留底部文字的选中效果
+        let style = if b == app.eq_selected { selected_bg } else { sub };
+        label_spans.push(ratatui::text::Span::styled(cell, style));
+    }
+    f.render_widget(Paragraph::new(Line::from(label_spans)).style(bg), label_rect);
+}
+
+pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
+    // Eq modal consumes clicks first
+    if app.overlay == Overlay::EqModal {
+        let area = centered_rect(layout.full, 44, 31);
+        let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        if inner.height >= 3 {
+            let bars_rect = Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: inner.height.saturating_sub(2),
+            };
+
+            if contains(bars_rect, col, row) {
+                const BANDS: usize = 3;
+                const BAR_W: u16 = 2;
+                const GAP: u16 = 2;
+
+                let labels = [
+                    format!("Low {:+03}dB", app.eq.low_db.clamp(-12.0, 12.0).round() as i32),
+                    format!("Mid {:+03}dB", app.eq.mid_db.clamp(-12.0, 12.0).round() as i32),
+                    format!("High {:+03}dB", app.eq.high_db.clamp(-12.0, 12.0).round() as i32),
+                ];
+                let mut col_w: [u16; BANDS] = [BAR_W; BANDS];
+                for (i, l) in labels.iter().enumerate() {
+                    let w = unicode_width::UnicodeWidthStr::width(l.as_str()) as u16;
+                    col_w[i] = w.max(BAR_W);
+                }
+                let total_w: u16 = col_w.iter().sum::<u16>() + GAP.saturating_mul((BANDS as u16).saturating_sub(1));
+
+                let (x0, col_w, gap) = if total_w <= bars_rect.width {
+                    (bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2, col_w, GAP)
+                } else {
+                    const FALLBACK_GAP: u16 = 8;
+                    const FALLBACK_COL_W: u16 = BAR_W + FALLBACK_GAP;
+                    let used_w = FALLBACK_COL_W.saturating_mul(BANDS as u16);
+                    (
+                        bars_rect.x + (bars_rect.width.saturating_sub(used_w)) / 2,
+                        [FALLBACK_COL_W; BANDS],
+                        0,
+                    )
+                };
+
+                let total_w: u16 = col_w.iter().sum::<u16>() + gap.saturating_mul((BANDS as u16).saturating_sub(1));
+                if col < x0 || col >= x0 + total_w {
+                    return None;
+                }
+
+                // Find band by walking variable widths; then check if click is inside the centered BAR_W region.
+                let mut cursor = x0;
+                let mut band: Option<usize> = None;
+                for b in 0..BANDS {
+                    let cw = col_w[b];
+                    let col_start = cursor;
+                    let col_end = cursor + cw;
+                    if col >= col_start && col < col_end {
+                        let left_pad = cw.saturating_sub(BAR_W) / 2;
+                        let bar_start = col_start + left_pad;
+                        let bar_end = bar_start + BAR_W;
+                        if col < bar_start || col >= bar_end {
+                            return None;
+                        }
+                        band = Some(b);
+                        break;
+                    }
+                    cursor = col_end.saturating_add(gap);
+                }
+
+                let Some(band) = band else {
+                    return None;
+                };
+
+                // fixed height mapping: prefer 25 rows (12..0..-12)
+                let want_h: u16 = 25;
+                let bars_h = if bars_rect.height >= want_h { want_h } else { bars_rect.height.max(3) };
+                let y0 = bars_rect.y + (bars_rect.height.saturating_sub(bars_h)) / 2;
+                if row < y0 || row >= y0 + bars_h {
+                    return None;
+                }
+                let rr = (row - y0) as i32;
+
+                let db_i = if bars_h == want_h {
+                    (12 - rr).clamp(-12, 12)
+                } else {
+                    let mid = (bars_h as i32) / 2;
+                    if rr == mid {
+                        0
+                    } else if rr < mid {
+                        let level = (mid - rr) as f32;
+                        let max = mid.max(1) as f32;
+                        ((12.0 * (level / max)).round() as i32).clamp(0, 12)
+                    } else {
+                        let level = (rr - mid) as f32;
+                        let max = (bars_h as i32 - 1 - mid).max(1) as f32;
+                        (-(12.0 * (level / max)).round() as i32).clamp(-12, 0)
+                    }
+                };
+
+                return Some(Action::EqSetBandDb {
+                    band,
+                    db: db_i as f32,
+                });
+            }
+        }
+    }
+
     if contains(layout.info_controls, col, row) {
-        // 3 segments: prev, play/pause, next
-        let w = layout.info_controls.width.max(1);
-        let rel = col.saturating_sub(layout.info_controls.x);
-        let seg = ((rel as u32) * 3 / (w as u32)) as u16;
-        return match seg {
-            0 => Some(Action::Prev),
-            1 => Some(Action::TogglePlayPause),
-            2 => Some(Action::Next),
-            _ => None,
-        };
+        return control_buttons::hit_test(layout.info_controls, app, col, row);
     }
 
     if contains(layout.info_volume, col, row) {

@@ -36,7 +36,7 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &AppSta
         f.render_widget(
             Paragraph::new(l1)
                 .style(Style::default().fg(app.theme.color_text()))
-                .alignment(Alignment::Left),
+                .alignment(Alignment::Center),
             Rect { x: lyric_inner.x, y: lyric_inner.y, width: lyric_inner.width, height: 1 },
         );
     }
@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &AppSta
         f.render_widget(
             Paragraph::new(l2)
                 .style(Style::default().fg(app.theme.color_subtext()))
-                .alignment(Alignment::Left),
+                .alignment(Alignment::Center),
             Rect { x: lyric_inner.x, y: lyric_inner.y + 1, width: lyric_inner.width, height: 1 },
         );
     }

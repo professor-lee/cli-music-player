@@ -84,25 +84,13 @@ impl AudioCapture {
             )?,
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
-                move |data: &[i16], _| {
-                    let mut tmp: Vec<f32> = Vec::with_capacity(data.len());
-                    for &s in data {
-                        tmp.push(s as f32 / i16::MAX as f32);
-                    }
-                    push_samples(&samples_cloned, &last_sample_cloned, &tmp);
-                },
+                move |data: &[i16], _| push_samples_i16(&samples_cloned, &last_sample_cloned, data),
                 err_fn,
                 None,
             )?,
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config.into(),
-                move |data: &[u16], _| {
-                    let mut tmp: Vec<f32> = Vec::with_capacity(data.len());
-                    for &s in data {
-                        tmp.push((s as f32 / u16::MAX as f32) * 2.0 - 1.0);
-                    }
-                    push_samples(&samples_cloned, &last_sample_cloned, &tmp);
-                },
+                move |data: &[u16], _| push_samples_u16(&samples_cloned, &last_sample_cloned, data),
                 err_fn,
                 None,
             )?,
@@ -139,6 +127,54 @@ impl AudioCapture {
 fn push_samples(buf: &Arc<Mutex<Vec<f32>>>, last_sample_at: &Arc<Mutex<Option<Instant>>>, data: &[f32]) {
     let mut guard = buf.lock().unwrap();
     guard.extend_from_slice(data);
+
+    if !data.is_empty() {
+        let mut t = last_sample_at.lock().unwrap();
+        *t = Some(Instant::now());
+    }
+
+    // keep last ~16384 samples
+    const CAP: usize = 16384;
+    if guard.len() > CAP {
+        let drop = guard.len() - CAP;
+        guard.drain(0..drop);
+    }
+}
+
+fn push_samples_i16(
+    buf: &Arc<Mutex<Vec<f32>>>,
+    last_sample_at: &Arc<Mutex<Option<Instant>>>,
+    data: &[i16],
+) {
+    let mut guard = buf.lock().unwrap();
+    guard.reserve(data.len());
+    for &s in data {
+        guard.push(s as f32 / i16::MAX as f32);
+    }
+
+    if !data.is_empty() {
+        let mut t = last_sample_at.lock().unwrap();
+        *t = Some(Instant::now());
+    }
+
+    // keep last ~16384 samples
+    const CAP: usize = 16384;
+    if guard.len() > CAP {
+        let drop = guard.len() - CAP;
+        guard.drain(0..drop);
+    }
+}
+
+fn push_samples_u16(
+    buf: &Arc<Mutex<Vec<f32>>>,
+    last_sample_at: &Arc<Mutex<Option<Instant>>>,
+    data: &[u16],
+) {
+    let mut guard = buf.lock().unwrap();
+    guard.reserve(data.len());
+    for &s in data {
+        guard.push((s as f32 / u16::MAX as f32) * 2.0 - 1.0);
+    }
 
     if !data.is_empty() {
         let mut t = last_sample_at.lock().unwrap();

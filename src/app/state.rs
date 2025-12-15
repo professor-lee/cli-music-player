@@ -37,12 +37,43 @@ impl RepeatMode {
         }
     }
 
-    pub fn as_label(self) -> &'static str {
+    pub fn symbol(self) -> &'static str {
         match self {
-            RepeatMode::Sequence => "S",
-            RepeatMode::Shuffle => "R",
-            RepeatMode::LoopAll => "L",
-            RepeatMode::LoopOne => "1",
+            // 需求：顺序播放 ⇔，随机播放 ≠，列表循环 ∞，单曲循环 ↻
+            RepeatMode::Sequence => "⇔",
+            RepeatMode::Shuffle => "≠",
+            RepeatMode::LoopAll => "∞",
+            RepeatMode::LoopOne => "↻",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EqSettings {
+    pub low_db: f32,
+    pub mid_db: f32,
+    pub high_db: f32,
+}
+
+impl Default for EqSettings {
+    fn default() -> Self {
+        Self {
+            low_db: 0.0,
+            mid_db: 0.0,
+            high_db: 0.0,
+        }
+    }
+}
+
+impl EqSettings {
+    pub fn clamp(self) -> Self {
+        fn c(v: f32) -> f32 {
+            v.clamp(-12.0, 12.0)
+        }
+        Self {
+            low_db: c(self.low_db),
+            mid_db: c(self.mid_db),
+            high_db: c(self.high_db),
         }
     }
 }
@@ -156,6 +187,7 @@ pub enum Overlay {
     FolderInput,
     SettingsModal,
     HelpModal,
+    EqModal,
 }
 
 #[derive(Debug)]
@@ -185,12 +217,16 @@ pub struct AppState {
 
     pub settings_selected: usize,
 
+    pub eq: EqSettings,
+    pub eq_selected: usize,
+
     pub cover_anim: Option<CoverAnim>,
     pub pending_system_cover_anim: Option<(CoverSnapshot, i8, Instant)>,
 
     pub toast: Option<(String, Instant)>,
 
     pub last_mouse_click: Option<(Instant, u16, u16)>,
+
 
     // playlist slide animation
     pub playlist_slide_x: i16,
@@ -211,6 +247,9 @@ impl AppState {
             overlay: Overlay::None,
             folder_input: FolderInput::default(),
             settings_selected: 0,
+
+            eq: EqSettings::default(),
+            eq_selected: 0,
 
             cover_anim: None,
             pending_system_cover_anim: None,

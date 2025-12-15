@@ -1,7 +1,8 @@
+use crate::data::assets;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -25,7 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "mocha".to_string(),
-            ui_fps: 60,
+            ui_fps: 30,
             spectrum_hz: 30,
             mpris_poll_ms: 100,
             transparent_background: false,
@@ -36,6 +37,8 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_default() -> Result<Self> {
+        // Ensure assets exist according to the required resolution rules.
+        let _ = assets::ensure_assets_ready();
         let path = Self::default_path();
         if !path.exists() {
             return Ok(Self::default());
@@ -45,6 +48,7 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
+        let _ = assets::ensure_assets_ready();
         let path = Self::default_path();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -55,37 +59,6 @@ impl Config {
     }
 
     fn default_path() -> PathBuf {
-        let rel = PathBuf::from("config/default.toml");
-        resolve_asset_path(&rel).unwrap_or(rel)
+        assets::resolve_config_path()
     }
-}
-
-fn resolve_asset_path(rel: &Path) -> Option<PathBuf> {
-    if let Ok(base) = std::env::var("CLI_MUSIC_PLAYER_ASSET_DIR") {
-        let p = PathBuf::from(base).join(rel);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe.parent();
-        for _ in 0..6 {
-            let Some(dir) = cur else { break };
-            let p = dir.join(rel);
-            if p.exists() {
-                return Some(p);
-            }
-            cur = dir.parent();
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join(rel);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    None
 }

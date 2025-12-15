@@ -1,0 +1,10 @@
+name = "mocha"
+
+# Catppuccin Mocha (approx)
+text = "#CDD6F4"
+subtext = "#A6ADC8"
+base = "#1E1E2E"
+surface = "#313244"
+accent = "#89B4FA"
+accent2 = "#A6E3A1"
+accent3 = "#F38BA8"

@@ -1,0 +1,8 @@
+name = "latte"
+text = "#4C4F69"
+subtext = "#5C5F77"
+base = "#EFF1F5"
+surface = "#CCD0DA"
+accent = "#1E66F5"
+accent2 = "#40A02B"
+accent3 = "#D20F39"

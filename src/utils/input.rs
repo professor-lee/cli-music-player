@@ -19,6 +19,10 @@ pub enum Action {
     OpenSettingsModal,
     OpenHelpModal,
 
+    OpenEqModal,
+
+    EqSetBandDb { band: usize, db: f32 },
+
     ModalUp,
     ModalDown,
 
@@ -68,6 +72,18 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
         };
     }
 
+    if overlay == Overlay::EqModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
     if overlay == Overlay::HelpModal {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
@@ -78,6 +94,7 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
     // global shortcuts (except folder input)
     match ev.code {
         KeyCode::Char('t') | KeyCode::Char('T') => return Action::OpenSettingsModal,
+        KeyCode::Char('e') | KeyCode::Char('E') => return Action::OpenEqModal,
         _ => {}
     }
 

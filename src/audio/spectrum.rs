@@ -18,7 +18,7 @@ impl SpectrumProcessor {
 
     pub fn process(&mut self, samples: Vec<f32>) -> [f32; 64] {
         let mags = self.fft.magnitudes(&samples);
-        let grouped = group_linear(&mags);
+        let grouped = group_linear(mags);
         let scaled = log_scale(grouped);
         let smoothed = self.smooth.apply(scaled);
         normalize(smoothed)

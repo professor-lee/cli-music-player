@@ -1,8 +1,9 @@
+use crate::data::assets;
 use crate::ui::theme::{detect_color_capability, Theme, ThemeName, ThemePalette};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct ThemeLoader;
 
@@ -20,6 +21,7 @@ struct ThemeToml {
 
 impl ThemeLoader {
     pub fn load(name: &str) -> Result<Theme> {
+        let _ = assets::ensure_assets_ready();
         let name = ThemeName::from_str_or_system(name);
 
         let rel = match name {
@@ -30,7 +32,7 @@ impl ThemeLoader {
             ThemeName::Mocha => PathBuf::from("themes/catppuccin_mocha.toml"),
         };
 
-        let path = resolve_asset_path(&rel).unwrap_or(rel);
+        let path = assets::resolve_asset_path(&rel);
         let raw = fs::read_to_string(path)?;
         let t: ThemeToml = toml::from_str(&raw)?;
         let capability = detect_color_capability();
@@ -58,36 +60,3 @@ fn parse_hex(s: &str) -> (u8, u8, u8) {
     (r, g, b)
 }
 
-fn resolve_asset_path(rel: &Path) -> Option<PathBuf> {
-    // Resolution order:
-    // 1) CLI_MUSIC_PLAYER_ASSET_DIR/<rel>
-    // 2) executable dir (and a few parent dirs) + <rel>
-    // 3) current working directory + <rel>
-    if let Ok(base) = std::env::var("CLI_MUSIC_PLAYER_ASSET_DIR") {
-        let p = PathBuf::from(base).join(rel);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe.parent();
-        for _ in 0..6 {
-            let Some(dir) = cur else { break };
-            let p = dir.join(rel);
-            if p.exists() {
-                return Some(p);
-            }
-            cur = dir.parent();
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let p = cwd.join(rel);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    None
-}
