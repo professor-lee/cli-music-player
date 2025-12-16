@@ -310,7 +310,7 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
 
 fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     // 需求：柱状条宽 2 格，高度 +12/-12（含 0 行共 25）
-    // 额外预留：顶部提示 1 行 + 底部数值 1 行
+    // 额外预留：顶部提示 1 行 + 底部频率/数值 2 行
     let area = centered_rect(size, 44, 31);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -341,71 +341,64 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         width: inner.width,
         height: 1,
     };
-    let label_rect = Rect {
-        x: inner.x,
-        y: inner.y + inner.height - 1,
-        width: inner.width,
-        height: 1,
-    };
+    let freq_label_rect = Rect { x: inner.x, y: inner.y + inner.height - 2, width: inner.width, height: 1 };
+    let gain_label_rect = Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 };
     let bars_rect = Rect {
         x: inner.x,
         y: inner.y + 1,
         width: inner.width,
-        height: inner.height.saturating_sub(2),
+        height: inner.height.saturating_sub(3),
     };
 
     f.render_widget(
-        Paragraph::new("Click/Up/Down adjust (auto)  Esc close")
+        Paragraph::new("Click/Up/Down adjust (auto)  Alt+R reset  Esc close")
             .style(sub)
             .wrap(Wrap { trim: true }),
         hint_rect,
     );
 
     // compute band geometry
-    const BANDS: usize = 3;
+    const BANDS: usize = crate::app::state::EQ_BANDS;
     const BAR_W: u16 = 2;
-    const GAP: u16 = 2;
+    const GAP: u16 = 1;
 
     fn fmt_db2(v: f32) -> String {
         let i = v.clamp(-12.0, 12.0).round() as i32;
         format!("{:+03}", i)
     }
 
-    let labels = [
-        format!("Low {}dB", fmt_db2(app.eq.low_db)),
-        format!("Mid {}dB", fmt_db2(app.eq.mid_db)),
-        format!("High {}dB", fmt_db2(app.eq.high_db)),
-    ];
-
-    // Column width is based on each label width (so bar is centered relative to its own text).
-    let mut col_w: [u16; BANDS] = [BAR_W; BANDS];
-    for (i, l) in labels.iter().enumerate() {
-        let w = unicode_width::UnicodeWidthStr::width(l.as_str()) as u16;
-        col_w[i] = w.max(BAR_W);
+    fn fmt_freq(freq_hz: f32) -> String {
+        let f = freq_hz.round() as i32;
+        if f >= 1000 {
+            format!("{}k", f / 1000)
+        } else {
+            format!("{f}")
+        }
     }
 
-    let total_w: u16 = col_w.iter().sum::<u16>() + GAP.saturating_mul((BANDS as u16).saturating_sub(1));
+    let gains = app.eq.bands_db;
+    let freq_labels: Vec<String> = crate::app::state::EQ_FREQS_HZ
+        .iter()
+        .map(|&f| fmt_freq(f))
+        .collect();
+    let gain_labels: Vec<String> = gains.iter().map(|&g| fmt_db2(g)).collect();
 
-    // If too narrow, fall back to fixed columns.
-    let (x0, col_w, gap) = if total_w <= bars_rect.width {
-        (bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2, col_w, GAP)
+    // Fit columns to available width (10 bands should still render on typical terminals).
+    let gaps_w = GAP.saturating_mul((BANDS as u16).saturating_sub(1));
+    let mut cw = if bars_rect.width > gaps_w {
+        (bars_rect.width - gaps_w) / (BANDS as u16)
     } else {
-        const FALLBACK_GAP: u16 = 8;
-        const FALLBACK_COL_W: u16 = BAR_W + FALLBACK_GAP;
-        let used_w = FALLBACK_COL_W.saturating_mul(BANDS as u16);
-        (
-            bars_rect.x + (bars_rect.width.saturating_sub(used_w)) / 2,
-            [FALLBACK_COL_W; BANDS],
-            0,
-        )
+        BAR_W
     };
+    cw = cw.clamp(BAR_W, 10);
+    let total_w: u16 = cw.saturating_mul(BANDS as u16) + gaps_w;
+    let x0 = bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2;
+    let gap = GAP;
 
     // fixed height: 25 rows => +12..0..-12
     let want_h: u16 = 25;
     let bars_h = if bars_rect.height >= want_h { want_h } else { bars_rect.height.max(3) };
     let y0 = bars_rect.y + (bars_rect.height.saturating_sub(bars_h)) / 2;
-
-    let gains = [app.eq.low_db, app.eq.mid_db, app.eq.high_db];
 
     // helper: map row index to db
     let row_to_db = |r: i32| -> i32 {
@@ -456,13 +449,17 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
                 gain < 0 && db_row >= gain
             };
 
-            // Each column: center the 2-cell bar within its own label-based width.
-            let cw = col_w[b];
+            // Each column: center the 2-cell bar within fixed column width.
             let left_pad = cw.saturating_sub(BAR_W) / 2;
             let right_pad = cw.saturating_sub(BAR_W) - left_pad;
             let mut cell = String::new();
             cell.push_str(&" ".repeat(left_pad as usize));
-            cell.push_str(if filled { "██" } else { "░░" });
+            // 需求：零点(0dB)使用“▓▓”标识。
+            if db_row == 0 {
+                cell.push_str("▓▓");
+            } else {
+                cell.push_str(if filled { "██" } else { "░░" });
+            }
             cell.push_str(&" ".repeat(right_pad as usize));
             if b + 1 < BANDS {
                 cell.push_str(&" ".repeat(gap as usize));
@@ -473,7 +470,7 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         }
 
         // right padding
-        let drawn = (col_w.iter().sum::<u16>() + gap.saturating_mul((BANDS as u16).saturating_sub(1)))
+        let drawn = (cw.saturating_mul(BANDS as u16) + gap.saturating_mul((BANDS as u16).saturating_sub(1)))
             + (x0 - bars_rect.x);
         if drawn < bars_rect.width {
             spans.push(ratatui::text::Span::styled(
@@ -493,34 +490,45 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     };
     f.render_widget(Paragraph::new(lines).style(bg).wrap(Wrap { trim: false }), draw_rect);
 
-    // bottom labels (one line)
-    let mut label_spans: Vec<ratatui::text::Span> = Vec::new();
+    // bottom labels (two lines): keep frequency + always show numeric gain.
+    let mut freq_spans: Vec<ratatui::text::Span> = Vec::new();
+    let mut gain_spans: Vec<ratatui::text::Span> = Vec::new();
     if x0 > bars_rect.x {
-        label_spans.push(ratatui::text::Span::styled(
-            " ".repeat((x0 - bars_rect.x) as usize),
-            bg,
-        ));
+        let pad = " ".repeat((x0 - bars_rect.x) as usize);
+        freq_spans.push(ratatui::text::Span::styled(pad.clone(), bg));
+        gain_spans.push(ratatui::text::Span::styled(pad, bg));
     }
     for b in 0..BANDS {
-        let cw = col_w[b];
-        let mut s = labels[b].clone();
-        // truncate by display width (best-effort for ASCII)
-        if unicode_width::UnicodeWidthStr::width(s.as_str()) as u16 > cw {
-            s = s.chars().take(cw as usize).collect();
-        }
-        let pad = cw.saturating_sub(unicode_width::UnicodeWidthStr::width(s.as_str()) as u16);
-        let left_pad = pad / 2;
-        let right_pad = pad - left_pad;
-        let mut cell = format!("{}{}{}", " ".repeat(left_pad as usize), s, " ".repeat(right_pad as usize));
-        if b + 1 < BANDS {
-            cell.push_str(&" ".repeat(gap as usize));
-        }
-
-        // 需求：保留底部文字的选中效果
         let style = if b == app.eq_selected { selected_bg } else { sub };
-        label_spans.push(ratatui::text::Span::styled(cell, style));
+
+        let mut ftxt = freq_labels[b].clone();
+        if unicode_width::UnicodeWidthStr::width(ftxt.as_str()) as u16 > cw {
+            ftxt = ftxt.chars().take(cw as usize).collect();
+        }
+        let fpad = cw.saturating_sub(unicode_width::UnicodeWidthStr::width(ftxt.as_str()) as u16);
+        let fleft = fpad / 2;
+        let fright = fpad - fleft;
+        let mut fcell = format!("{}{}{}", " ".repeat(fleft as usize), ftxt, " ".repeat(fright as usize));
+        if b + 1 < BANDS {
+            fcell.push_str(&" ".repeat(gap as usize));
+        }
+        freq_spans.push(ratatui::text::Span::styled(fcell, style));
+
+        let mut gtxt = gain_labels[b].clone();
+        if unicode_width::UnicodeWidthStr::width(gtxt.as_str()) as u16 > cw {
+            gtxt = gtxt.chars().take(cw as usize).collect();
+        }
+        let gpad = cw.saturating_sub(unicode_width::UnicodeWidthStr::width(gtxt.as_str()) as u16);
+        let gleft = gpad / 2;
+        let gright = gpad - gleft;
+        let mut gcell = format!("{}{}{}", " ".repeat(gleft as usize), gtxt, " ".repeat(gright as usize));
+        if b + 1 < BANDS {
+            gcell.push_str(&" ".repeat(gap as usize));
+        }
+        gain_spans.push(ratatui::text::Span::styled(gcell, style));
     }
-    f.render_widget(Paragraph::new(Line::from(label_spans)).style(bg), label_rect);
+    f.render_widget(Paragraph::new(Line::from(freq_spans)).style(bg), freq_label_rect);
+    f.render_widget(Paragraph::new(Line::from(gain_spans)).style(bg), gain_label_rect);
 }
 
 pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
@@ -533,51 +541,32 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
                 x: inner.x,
                 y: inner.y + 1,
                 width: inner.width,
-                height: inner.height.saturating_sub(2),
+                height: inner.height.saturating_sub(3),
             };
 
             if contains(bars_rect, col, row) {
-                const BANDS: usize = 3;
+                const BANDS: usize = crate::app::state::EQ_BANDS;
                 const BAR_W: u16 = 2;
-                const GAP: u16 = 2;
+                const GAP: u16 = 1;
 
-                let labels = [
-                    format!("Low {:+03}dB", app.eq.low_db.clamp(-12.0, 12.0).round() as i32),
-                    format!("Mid {:+03}dB", app.eq.mid_db.clamp(-12.0, 12.0).round() as i32),
-                    format!("High {:+03}dB", app.eq.high_db.clamp(-12.0, 12.0).round() as i32),
-                ];
-                let mut col_w: [u16; BANDS] = [BAR_W; BANDS];
-                for (i, l) in labels.iter().enumerate() {
-                    let w = unicode_width::UnicodeWidthStr::width(l.as_str()) as u16;
-                    col_w[i] = w.max(BAR_W);
-                }
-                let total_w: u16 = col_w.iter().sum::<u16>() + GAP.saturating_mul((BANDS as u16).saturating_sub(1));
-
-                let (x0, col_w, gap) = if total_w <= bars_rect.width {
-                    (bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2, col_w, GAP)
+                let gaps_w = GAP.saturating_mul((BANDS as u16).saturating_sub(1));
+                let mut cw = if bars_rect.width > gaps_w {
+                    (bars_rect.width - gaps_w) / (BANDS as u16)
                 } else {
-                    const FALLBACK_GAP: u16 = 8;
-                    const FALLBACK_COL_W: u16 = BAR_W + FALLBACK_GAP;
-                    let used_w = FALLBACK_COL_W.saturating_mul(BANDS as u16);
-                    (
-                        bars_rect.x + (bars_rect.width.saturating_sub(used_w)) / 2,
-                        [FALLBACK_COL_W; BANDS],
-                        0,
-                    )
+                    BAR_W
                 };
-
-                let total_w: u16 = col_w.iter().sum::<u16>() + gap.saturating_mul((BANDS as u16).saturating_sub(1));
+                cw = cw.clamp(BAR_W, 10);
+                let total_w: u16 = cw.saturating_mul(BANDS as u16) + gaps_w;
+                let x0 = bars_rect.x + (bars_rect.width.saturating_sub(total_w)) / 2;
                 if col < x0 || col >= x0 + total_w {
                     return None;
                 }
 
-                // Find band by walking variable widths; then check if click is inside the centered BAR_W region.
-                let mut cursor = x0;
+                // Find band by fixed widths; then require click within the centered BAR_W region.
                 let mut band: Option<usize> = None;
                 for b in 0..BANDS {
-                    let cw = col_w[b];
-                    let col_start = cursor;
-                    let col_end = cursor + cw;
+                    let col_start = x0 + (b as u16) * (cw + GAP);
+                    let col_end = col_start + cw;
                     if col >= col_start && col < col_end {
                         let left_pad = cw.saturating_sub(BAR_W) / 2;
                         let bar_start = col_start + left_pad;
@@ -588,12 +577,9 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
                         band = Some(b);
                         break;
                     }
-                    cursor = col_end.saturating_add(gap);
                 }
 
-                let Some(band) = band else {
-                    return None;
-                };
+                let Some(band) = band else { return None; };
 
                 // fixed height mapping: prefer 25 rows (12..0..-12)
                 let want_h: u16 = 25;

@@ -3,6 +3,7 @@ use crate::data::playlist::Playlist;
 use crate::render::cover_cache::CoverCache;
 use crate::ui::theme::Theme;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,31 +51,25 @@ impl RepeatMode {
 
 #[derive(Debug, Clone, Copy)]
 pub struct EqSettings {
-    pub low_db: f32,
-    pub mid_db: f32,
-    pub high_db: f32,
+    pub bands_db: [f32; EQ_BANDS],
 }
+
+pub const EQ_BANDS: usize = 10;
+pub const EQ_FREQS_HZ: [f32; EQ_BANDS] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 
 impl Default for EqSettings {
     fn default() -> Self {
-        Self {
-            low_db: 0.0,
-            mid_db: 0.0,
-            high_db: 0.0,
-        }
+        Self { bands_db: [0.0; EQ_BANDS] }
     }
 }
 
 impl EqSettings {
     pub fn clamp(self) -> Self {
-        fn c(v: f32) -> f32 {
-            v.clamp(-12.0, 12.0)
+        let mut out = self;
+        for v in &mut out.bands_db {
+            *v = v.clamp(-12.0, 12.0);
         }
-        Self {
-            low_db: c(self.low_db),
-            mid_db: c(self.mid_db),
-            high_db: c(self.high_db),
-        }
+        out
     }
 }
 
@@ -220,6 +215,8 @@ pub struct AppState {
     pub eq: EqSettings,
     pub eq_selected: usize,
 
+    pub local_folder: Option<PathBuf>,
+
     pub cover_anim: Option<CoverAnim>,
     pub pending_system_cover_anim: Option<(CoverSnapshot, i8, Instant)>,
 
@@ -250,6 +247,8 @@ impl AppState {
 
             eq: EqSettings::default(),
             eq_selected: 0,
+
+            local_folder: None,
 
             cover_anim: None,
             pending_system_cover_anim: None,

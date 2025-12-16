@@ -4,12 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+const DEFAULT_EQ_BANDS_DB: [f32; crate::app::state::EQ_BANDS] = [0.0; crate::app::state::EQ_BANDS];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub theme: String,
     pub ui_fps: u32,
     pub spectrum_hz: u32,
     pub mpris_poll_ms: u64,
+
+    #[serde(default = "default_eq_bands_db")]
+    pub eq_bands_db: [f32; crate::app::state::EQ_BANDS],
 
     #[serde(default)]
     pub transparent_background: bool,
@@ -22,6 +27,10 @@ fn default_album_border() -> bool {
     true
 }
 
+fn default_eq_bands_db() -> [f32; crate::app::state::EQ_BANDS] {
+    DEFAULT_EQ_BANDS_DB
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -29,6 +38,7 @@ impl Default for Config {
             ui_fps: 30,
             spectrum_hz: 30,
             mpris_poll_ms: 100,
+            eq_bands_db: default_eq_bands_db(),
             transparent_background: false,
             album_border: default_album_border(),
         }

@@ -11,6 +11,7 @@ use crate::utils::system_volume::SystemVolume;
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
@@ -263,16 +264,31 @@ fn handle_action(
         }
         Action::EqSetBandDb { band, db } => {
             if app.overlay == Overlay::EqModal {
-                app.eq_selected = band.min(2);
+                app.eq_selected = band.min(crate::app::state::EQ_BANDS.saturating_sub(1));
                 let db = db.clamp(-12.0, 12.0);
-                match app.eq_selected {
-                    0 => app.eq.low_db = db,
-                    1 => app.eq.mid_db = db,
-                    2 => app.eq.high_db = db,
-                    _ => {}
+                if app.eq_selected < crate::app::state::EQ_BANDS {
+                    app.eq.bands_db[app.eq_selected] = db;
                 }
 
+                // Persist EQ to config (best-effort).
+                app.config.eq_bands_db = app.eq.bands_db;
+                let _ = app.config.save();
+
                 // 需求：均衡器自动生效
+                if app.player.mode == PlayMode::LocalPlayback {
+                    let _ = mode_manager.local.set_eq(app.eq);
+                }
+            }
+        }
+        Action::EqResetDefault => {
+            if app.overlay == Overlay::EqModal {
+                app.eq = crate::app::state::EqSettings::default();
+                app.eq_selected = 0;
+
+                // Persist reset.
+                app.config.eq_bands_db = app.eq.bands_db;
+                let _ = app.config.save();
+
                 if app.player.mode == PlayMode::LocalPlayback {
                     let _ = mode_manager.local.set_eq(app.eq);
                 }
@@ -300,6 +316,11 @@ fn handle_action(
                 app.playlist_slide_target_x = -(layout.left_width as i16);
                 app.overlay = Overlay::None;
             } else {
+                // 需求：打开 playlist 时聚焦当前播放的歌曲。
+                if let Some(cur) = app.playlist.current {
+                    app.playlist.selected = cur;
+                    app.playlist.clamp_selected();
+                }
                 app.overlay = Overlay::Playlist;
                 app.playlist_slide_x = -(layout.left_width as i16);
                 app.playlist_slide_target_x = 0;
@@ -321,6 +342,12 @@ fn handle_action(
                             app.player.track = first_track;
                             app.player.volume = mode_manager.local.volume();
                             app.player.playback = mode_manager.local.playback_state();
+
+                            // Apply persisted EQ to the local player when entering local mode.
+                            app.eq.bands_db = app.config.eq_bands_db;
+                            let _ = mode_manager.local.set_eq(app.eq);
+
+                            app.local_folder = Some(PathBuf::from(folder));
                         }
                         Err(e) => {
                             app.set_toast(format!("Folder error: {e}"));
@@ -367,6 +394,28 @@ fn handle_action(
             app.playlist.move_down();
             app.playlist.clamp_selected();
         }
+        Action::PlaylistMoveItemUp => {
+            if app.overlay == Overlay::Playlist && app.player.mode == PlayMode::LocalPlayback {
+                if app.playlist.move_selected_item_up() {
+                    if let Some(folder) = app.local_folder.as_deref() {
+                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist) {
+                            app.set_toast(format!("Order save error: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        Action::PlaylistMoveItemDown => {
+            if app.overlay == Overlay::Playlist && app.player.mode == PlayMode::LocalPlayback {
+                if app.playlist.move_selected_item_down() {
+                    if let Some(folder) = app.local_folder.as_deref() {
+                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist) {
+                            app.set_toast(format!("Order save error: {e}"));
+                        }
+                    }
+                }
+            }
+        }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
                 let count = 4;
@@ -377,11 +426,9 @@ fn handle_action(
                 }
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
-                match app.eq_selected {
-                    0 => app.eq.low_db = (app.eq.low_db + step).clamp(-12.0, 12.0),
-                    1 => app.eq.mid_db = (app.eq.mid_db + step).clamp(-12.0, 12.0),
-                    2 => app.eq.high_db = (app.eq.high_db + step).clamp(-12.0, 12.0),
-                    _ => {}
+                if app.eq_selected < crate::app::state::EQ_BANDS {
+                    let v = app.eq.bands_db[app.eq_selected];
+                    app.eq.bands_db[app.eq_selected] = (v + step).clamp(-12.0, 12.0);
                 }
 
                 // 需求：均衡器自动生效
@@ -396,11 +443,9 @@ fn handle_action(
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
-                match app.eq_selected {
-                    0 => app.eq.low_db = (app.eq.low_db - step).clamp(-12.0, 12.0),
-                    1 => app.eq.mid_db = (app.eq.mid_db - step).clamp(-12.0, 12.0),
-                    2 => app.eq.high_db = (app.eq.high_db - step).clamp(-12.0, 12.0),
-                    _ => {}
+                if app.eq_selected < crate::app::state::EQ_BANDS {
+                    let v = app.eq.bands_db[app.eq_selected];
+                    app.eq.bands_db[app.eq_selected] = (v - step).clamp(-12.0, 12.0);
                 }
 
                 // 需求：均衡器自动生效
@@ -413,7 +458,7 @@ fn handle_action(
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
-                let count = 3;
+                let count = crate::app::state::EQ_BANDS;
                 if app.eq_selected == 0 {
                     app.eq_selected = count - 1;
                 } else {
@@ -425,7 +470,7 @@ fn handle_action(
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
-                let count = 3;
+                let count = crate::app::state::EQ_BANDS;
                 app.eq_selected = (app.eq_selected + 1) % count;
             }
         }

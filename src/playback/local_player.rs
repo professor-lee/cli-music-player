@@ -1,8 +1,10 @@
-use crate::app::state::{EqSettings, PlaybackState, TrackMetadata};
+use crate::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings, PlaybackState, TrackMetadata};
 use crate::data::playlist::{Playlist, PlaylistItem};
 use crate::playback::metadata::read_metadata;
 use anyhow::{anyhow, Result};
 use rodio::{OutputStream, Sink, Source};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,42 +22,112 @@ use symphonia::core::units::Time;
 
 struct EqParams {
     // store dB * 10 as integer to avoid float atomics
-    low_db_x10: AtomicI32,
-    mid_db_x10: AtomicI32,
-    high_db_x10: AtomicI32,
+    bands_db_x10: [AtomicI32; EQ_BANDS],
 }
 
 impl EqParams {
     fn new() -> Self {
         Self {
-            low_db_x10: AtomicI32::new(0),
-            mid_db_x10: AtomicI32::new(0),
-            high_db_x10: AtomicI32::new(0),
+            bands_db_x10: std::array::from_fn(|_| AtomicI32::new(0)),
         }
     }
 
     fn set_from(&self, eq: EqSettings) {
         let eq = eq.clamp();
-        self.low_db_x10.store((eq.low_db * 10.0).round() as i32, Ordering::Relaxed);
-        self.mid_db_x10.store((eq.mid_db * 10.0).round() as i32, Ordering::Relaxed);
-        self.high_db_x10.store((eq.high_db * 10.0).round() as i32, Ordering::Relaxed);
+        for (i, v) in eq.bands_db.iter().enumerate() {
+            self.bands_db_x10[i].store((v * 10.0).round() as i32, Ordering::Relaxed);
+        }
     }
 
-    fn load_db(&self) -> [f32; 3] {
-        [
-            self.low_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-            self.mid_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-            self.high_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-        ]
+    fn load_db(&self) -> [f32; EQ_BANDS] {
+        std::array::from_fn(|i| self.bands_db_x10[i].load(Ordering::Relaxed) as f32 / 10.0)
     }
 
-    fn load_db_x10(&self) -> [i32; 3] {
-        [
-            self.low_db_x10.load(Ordering::Relaxed),
-            self.mid_db_x10.load(Ordering::Relaxed),
-            self.high_db_x10.load(Ordering::Relaxed),
-        ]
+    fn load_db_x10(&self) -> [i32; EQ_BANDS] {
+        std::array::from_fn(|i| self.bands_db_x10[i].load(Ordering::Relaxed))
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct OrderFile {
+    order: Vec<String>,
+}
+
+fn order_key(folder: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(folder).unwrap_or(path);
+    let s = rel.to_string_lossy().to_string();
+    // Normalize in case paths ever contain backslashes (e.g., copied config).
+    s.replace('\\', "/")
+}
+
+fn read_order_file(folder: &Path) -> Option<OrderFile> {
+    let p = folder.join(".order.toml");
+    let s = std::fs::read_to_string(p).ok()?;
+    toml::from_str(&s).ok()
+}
+
+fn apply_order_file(folder: &Path, playlist: &mut Playlist, order: &OrderFile) {
+    if playlist.items.is_empty() {
+        return;
+    }
+
+    let selected_path = playlist.selected_path().cloned();
+    let current_path = playlist.current_path().cloned();
+
+    let mut key_to_index: HashMap<String, usize> = HashMap::with_capacity(playlist.items.len());
+    for (i, it) in playlist.items.iter().enumerate() {
+        key_to_index.insert(order_key(folder, &it.path), i);
+    }
+
+    let mut used = vec![false; playlist.items.len()];
+    let mut new_items: Vec<PlaylistItem> = Vec::with_capacity(playlist.items.len());
+
+    for k in &order.order {
+        if let Some(&idx) = key_to_index.get(k) {
+            if !used[idx] {
+                used[idx] = true;
+                new_items.push(playlist.items[idx].clone());
+            }
+        }
+    }
+
+    for (i, it) in playlist.items.iter().enumerate() {
+        if !used[i] {
+            new_items.push(it.clone());
+        }
+    }
+
+    playlist.items = new_items;
+
+    // Restore selection/current by path (best-effort).
+    if let Some(sp) = selected_path {
+        if let Some(i) = playlist.items.iter().position(|it| it.path == sp) {
+            playlist.selected = i;
+        }
+    }
+    if let Some(cp) = current_path {
+        if let Some(i) = playlist.items.iter().position(|it| it.path == cp) {
+            playlist.current = Some(i);
+        }
+    }
+    playlist.clamp_selected();
+}
+
+pub fn write_order_file(folder: &Path, playlist: &Playlist) -> Result<()> {
+    let order = playlist
+        .items
+        .iter()
+        .map(|it| order_key(folder, &it.path))
+        .collect::<Vec<_>>();
+    let content = toml::to_string_pretty(&OrderFile { order })?;
+
+    let tmp = folder.join(".order.toml.tmp");
+    let dst = folder.join(".order.toml");
+    std::fs::write(&tmp, content)?;
+    // Best-effort atomic replace.
+    let _ = std::fs::remove_file(&dst);
+    std::fs::rename(&tmp, &dst)?;
+    Ok(())
 }
 
 pub struct LocalPlayer {
@@ -116,7 +188,7 @@ impl LocalPlayer {
 
         let mut playlist = Playlist::default();
         let mut files: Vec<PathBuf> = Vec::new();
-        for entry in std::fs::read_dir(p)? {
+        for entry in std::fs::read_dir(&p)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() && is_audio(&path) {
@@ -133,6 +205,15 @@ impl LocalPlayer {
                 .to_string();
             playlist.items.push(PlaylistItem { path, title });
         }
+
+        // Optional persisted order (local folder only). If it fails to parse, keep default order.
+        if let Some(order) = read_order_file(&p) {
+            apply_order_file(&p, &mut playlist, &order);
+        }
+
+        // For a freshly loaded folder, start from the top of the (possibly re-ordered) list.
+        playlist.selected = 0;
+
         playlist.clamp_selected();
         playlist.set_current_selected();
 
@@ -607,8 +688,8 @@ where
     channels: u16,
     idx: usize,
     params: Arc<EqParams>,
-    last_db_x10: [i32; 3],
-    coeffs: [BiquadCoeffs; 3],
+    last_db_x10: [i32; EQ_BANDS],
+    coeffs: [BiquadCoeffs; EQ_BANDS],
     states: Vec<BiquadState>,
 }
 
@@ -622,13 +703,9 @@ where
         let eq_db = params.load_db();
         let last_db_x10 = params.load_db_x10();
 
-        let coeffs = [
-            biquad_peaking(fs, 100.0, 1.0, eq_db[0]),
-            biquad_peaking(fs, 1000.0, 1.0, eq_db[1]),
-            biquad_peaking(fs, 8000.0, 1.0, eq_db[2]),
-        ];
+        let coeffs = std::array::from_fn(|i| biquad_peaking(fs, EQ_FREQS_HZ[i], 1.0, eq_db[i]));
 
-        let states = vec![BiquadState::default(); (channels as usize) * 3];
+        let states = vec![BiquadState::default(); (channels as usize) * EQ_BANDS];
 
         Self {
             inner,
@@ -642,7 +719,7 @@ where
     }
 
     fn state_index(&self, ch: usize, band: usize) -> usize {
-        ch * 3 + band
+        ch * EQ_BANDS + band
     }
 }
 
@@ -658,11 +735,7 @@ where
         if cur != self.last_db_x10 {
             let fs = self.inner.sample_rate() as f32;
             let eq_db = self.params.load_db();
-            self.coeffs = [
-                biquad_peaking(fs, 100.0, 1.0, eq_db[0]),
-                biquad_peaking(fs, 1000.0, 1.0, eq_db[1]),
-                biquad_peaking(fs, 8000.0, 1.0, eq_db[2]),
-            ];
+            self.coeffs = std::array::from_fn(|i| biquad_peaking(fs, EQ_FREQS_HZ[i], 1.0, eq_db[i]));
             self.last_db_x10 = cur;
         }
 
@@ -671,7 +744,7 @@ where
         self.idx = self.idx.wrapping_add(1);
 
         let mut y = x;
-        for band in 0..3 {
+        for band in 0..EQ_BANDS {
             let si = self.state_index(ch, band);
             y = biquad_process(&self.coeffs[band], &mut self.states[si], y);
         }

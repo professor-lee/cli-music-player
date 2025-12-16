@@ -21,6 +21,8 @@ pub enum Action {
 
     OpenEqModal,
 
+    EqResetDefault,
+
     EqSetBandDb { band: usize, db: f32 },
 
     ModalUp,
@@ -31,6 +33,8 @@ pub enum Action {
 
     PlaylistUp,
     PlaylistDown,
+    PlaylistMoveItemUp,
+    PlaylistMoveItemDown,
     PlaylistSelect(usize),
 
     SeekToFraction(f32),
@@ -73,6 +77,13 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
     }
 
     if overlay == Overlay::EqModal {
+        // Alt+R: reset EQ to default
+        if ev.modifiers.contains(KeyModifiers::ALT) {
+            if matches!(ev.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+                return Action::EqResetDefault;
+            }
+        }
+
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
@@ -112,8 +123,20 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
             KeyCode::Char('p') | KeyCode::Char('P') => Action::TogglePlaylist,
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
-            KeyCode::Up => Action::PlaylistUp,
-            KeyCode::Down => Action::PlaylistDown,
+            KeyCode::Up => {
+                if ev.modifiers.contains(KeyModifiers::CONTROL) {
+                    Action::PlaylistMoveItemUp
+                } else {
+                    Action::PlaylistUp
+                }
+            }
+            KeyCode::Down => {
+                if ev.modifiers.contains(KeyModifiers::CONTROL) {
+                    Action::PlaylistMoveItemDown
+                } else {
+                    Action::PlaylistDown
+                }
+            }
             _ => Action::None,
         };
     }

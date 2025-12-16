@@ -15,5 +15,7 @@ fn main() -> Result<()> {
     let theme = data::theme_loader::ThemeLoader::load(&config.theme)?;
 
     let mut app = app::state::AppState::new(config, theme);
+    // Initialize EQ from config (persisted per user).
+    app.eq.bands_db = app.config.eq_bands_db;
     app::event_loop::run(&mut app)
 }
