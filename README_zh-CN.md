@@ -25,12 +25,19 @@
 这是一个运行在 Linux 终端中的 TUI 音乐播放器。
 支持本地播放与系统播放监控（MPRIS），并提供频谱可视化。
 
+<p align="center">
+  <img src="overview.png" alt="CLI 音乐播放器总览">
+</p>
+
 <h2 align="center">已有功能</h2>
 
 - 本地音频播放
+- 本地音频播放模式更改（列表循环/单曲循环/顺序播放/随机播放）
+- 本地音频均衡器支持
 - 系统播放监控（MPRIS）
 - 播放列表侧边栏
-- Settings 弹窗（主题切换 + 开关项）
+- Settings 弹窗（主题切换 + 开关项 + UI FPS 30/60）
+- 歌词显示
 - 频谱可视化（优先使用 `cava` bars；不可用时回退内部 FFT）
 
 <h2 align="center">技术栈</h2>
@@ -166,7 +173,8 @@ cargo build --release
 | `Space` | 播放/暂停 |
 | `Left` / `Right` | 上一首 / 下一首 |
 | `Up` / `Down` | 音量加 / 减 |
-| `M` | 切换重复模式 |
+| `E` | 打开均衡器（仅本地） |
+| `M` | 切换重复模式（仅本地） |
 | `T` | 打开 Settings |
 | `Ctrl+K` | 打开 Keys（帮助） |
 | `Q` | 退出 |

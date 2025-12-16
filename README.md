@@ -25,12 +25,19 @@
 This is a Linux terminal (TUI) music player built with Rust.
 It supports local playback and system monitoring, and includes spectrum visualization.
 
+<p align="center">
+	<img src="overview.png" alt="CLI Music Player Overview">
+</p>
+
 <h2 align="center">Features</h2>
 
 - Local audio playback
+- Local Audio Playback Mode Changes (Playlist Loop / Single Track Loop / Sequential Playback / Shuffle)
+- Local Audio Equalizer Support
 - System playback monitoring (MPRIS)
 - Playlist panel
-- Settings modal (theme switch + toggles)
+- Settings modal (theme switch + toggles + UI FPS 30/60)
+- Lyrics display
 - Spectrum visualization (prefers `cava` bars when available; falls back to internal FFT)
 
 <h2 align="center">Tech Stack</h2>
@@ -166,7 +173,8 @@ Open the in-app help at any time with `Ctrl+K`.
 | `Space` | Play/Pause |
 | `Left` / `Right` | Prev / Next |
 | `Up` / `Down` | Volume up / down |
-| `M` | Toggle repeat mode |
+| `E` | Open the equalizer (local) |
+| `M` | Toggle repeat mode (local) |
 | `T` | Open Settings |
 | `Ctrl+K` | Open Keys (help) |
 | `Q` | Quit |
