@@ -27,6 +27,7 @@ pub struct UiLayout {
 
     pub playlist_rect: Rect,
     pub playlist_inner: Rect,
+    pub playlist_list_inner: Rect,
 }
 
 pub struct Tui {
@@ -144,7 +145,9 @@ impl Tui {
                         height: cols[0].height,
                     };
                     layout_out.playlist_rect = r;
-                    layout_out.playlist_inner = r.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                    let pl_layout = playlist_panel::compute_layout(r, app);
+                    layout_out.playlist_inner = pl_layout.inner;
+                    layout_out.playlist_list_inner = pl_layout.list_inner;
                     playlist_panel::render(f, r, app);
                 }
             }
@@ -267,7 +270,8 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
 }
 
 fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    let area = centered_rect(size, 56, 13);
+    // Needs enough height to show Global + Playlist sections without truncation.
+    let area = centered_rect(size, 60, 25);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -287,6 +291,7 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     lines.push(Line::styled("Esc = Close", sub));
     lines.push(Line::styled("", bg));
 
+    lines.push(Line::styled("Global", sub));
     for l in [
         "Ctrl+F    Open folder",
         "P         Toggle playlist",
@@ -298,6 +303,20 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         "T         Settings",
         "Ctrl+K    This help",
         "Q         Quit",
+    ] {
+        lines.push(Line::styled(l, text));
+    }
+
+    lines.push(Line::styled("", bg));
+    lines.push(Line::styled("Playlist", sub));
+    for l in [
+        "Up/Down   Select track",
+        "Enter     Play selected",
+        "Ctrl+Up   Move item up",
+        "Ctrl+Down Move item down",
+        "Ctrl+Left Prev album (Multi)",
+        "Ctrl+Right Next album (Multi)",
+        "P         Close playlist",
     ] {
         lines.push(Line::styled(l, text));
     }
@@ -627,8 +646,8 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         return Some(Action::SeekToFraction(ratio_in_track(layout.info_progress, col)));
     }
 
-    if contains(layout.playlist_inner, col, row) {
-        let idx = row.saturating_sub(layout.playlist_inner.y) as usize;
+    if contains(layout.playlist_list_inner, col, row) {
+        let idx = row.saturating_sub(layout.playlist_list_inner.y) as usize;
         return Some(Action::PlaylistSelect(idx));
     }
 

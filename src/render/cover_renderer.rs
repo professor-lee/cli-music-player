@@ -4,7 +4,8 @@ pub const COVER_CHARSET: &str = "⠀░▒▓█";
 
 pub fn render_cover_ascii(image_bytes: &[u8], width: u16, height: u16) -> Option<String> {
     let img = image::load_from_memory(image_bytes).ok()?;
-    let resized = img.resize_exact(width as u32, (height as u32).saturating_mul(2), FilterType::Lanczos3);
+    // Performance: large covers + Lanczos can be very expensive; Triangle is much faster.
+    let resized = img.resize_exact(width as u32, (height as u32).saturating_mul(2), FilterType::Triangle);
     let gray = resized.to_luma8();
 
     let charset: Vec<char> = COVER_CHARSET.chars().collect();

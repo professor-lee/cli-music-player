@@ -1,10 +1,335 @@
 use crate::app::state::AppState;
+use crate::app::state::{LocalFolderKind, Overlay, PlayMode};
 use crate::ui::borders::SOLID_BORDER;
+use crate::render::cover_cache::CoverKey;
+use crate::render::cover_renderer::render_cover_ascii;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlaylistPanelLayout {
+    pub inner: Rect,
+    pub cover_area: Rect,
+    pub separator_area: Rect,
+    pub list_area: Rect,
+    pub list_inner: Rect,
+}
+
+pub fn compute_layout(area: Rect, app: &AppState) -> PlaylistPanelLayout {
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+    let show_cover = app.player.mode == PlayMode::LocalPlayback
+        && (app.local_folder_kind == LocalFolderKind::Album || app.local_folder_kind == LocalFolderKind::MultiAlbum);
+
+    if !show_cover {
+        return PlaylistPanelLayout {
+            inner,
+            cover_area: Rect { x: inner.x, y: inner.y, width: inner.width, height: 0 },
+            separator_area: Rect { x: inner.x, y: inner.y, width: inner.width, height: 0 },
+            list_area: inner,
+            list_inner: inner,
+        };
+    }
+
+    // Layout: cover (1/3) + 1-line separator + list (rest)
+    let cover_h = ((inner.height as f32) / 3.0).round() as u16;
+    let cover_h = cover_h.clamp(3, inner.height.saturating_sub(4));
+    let sep_h = 1u16;
+    let list_h = inner.height.saturating_sub(cover_h).saturating_sub(sep_h);
+    let cover_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: cover_h };
+    let separator_area = Rect { x: inner.x, y: inner.y + cover_h, width: inner.width, height: sep_h };
+    let list_area = Rect { x: inner.x, y: inner.y + cover_h + sep_h, width: inner.width, height: list_h };
+    let list_inner = list_area;
+
+    PlaylistPanelLayout {
+        inner,
+        cover_area,
+        separator_area,
+        list_area,
+        list_inner,
+    }
+}
+
+fn cover_rect_in_area(area: Rect) -> Rect {
+    // 视觉正方形：终端字符通常宽:高≈2:1
+    let pad_h = 2u16;
+    let avail_w = area.width.saturating_sub(pad_h.saturating_mul(2));
+    let avail_h = area.height;
+
+    let max_h_by_w = (avail_w / 2).max(1);
+    let cover_h = avail_h.min(max_h_by_w).max(1);
+    let cover_w = (cover_h.saturating_mul(2)).min(avail_w).max(2);
+
+    let x = area.x + (area.width.saturating_sub(cover_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(cover_h)) / 2;
+    Rect { x, y, width: cover_w, height: cover_h }
+}
+
+fn render_album_cover(f: &mut Frame, area: Rect, app: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let cover = cover_rect_in_area(area);
+    if cover.width == 0 || cover.height == 0 {
+        return;
+    }
+
+    // Performance: during slide in/out, avoid expensive cover ASCII rendering.
+    // Only render the real cover when the playlist overlay is fully expanded.
+    let fully_expanded = app.overlay == Overlay::Playlist
+        && app.playlist_slide_x == 0
+        && app.playlist_slide_target_x == 0;
+    if !fully_expanded {
+        let row = "▒".repeat(cover.width as usize);
+        let mut s = String::new();
+        for _ in 0..cover.height {
+            s.push_str(&row);
+            s.push('\n');
+        }
+        f.render_widget(
+            Paragraph::new(s)
+                .style(Style::default().bg(app.theme.color_surface()).fg(app.theme.color_subtext()))
+                .wrap(Wrap { trim: false }),
+            cover,
+        );
+        return;
+    }
+
+    // Render slide animation when switching albums in MultiAlbum.
+    if let Some(anim) = &app.playlist_album_anim {
+        let now = app.last_frame;
+        let p = (now.duration_since(anim.started_at).as_secs_f32() / anim.duration.as_secs_f32())
+            .clamp(0.0, 1.0);
+        let offset = (p * cover.width as f32).round() as i16;
+
+        let from_ascii = album_cover_ascii(
+            anim.from_cover.as_ref(),
+            anim.from_hash,
+            cover.width,
+            cover.height,
+            app,
+            '█',
+        );
+        let to_ascii = album_cover_ascii(
+            anim.to_cover.as_ref(),
+            anim.to_hash,
+            cover.width,
+            cover.height,
+            app,
+            '█',
+        );
+
+        let composed = compose_slide_cover(cover.width, cover.height, &from_ascii, &to_ascii, anim.dir, offset);
+        f.render_widget(
+            Paragraph::new(composed)
+                .style(Style::default().bg(app.theme.color_surface()).fg(app.theme.color_text()))
+                .wrap(Wrap { trim: false }),
+            cover,
+        );
+    } else {
+        let ascii = album_cover_ascii(
+            app.local_view_album_cover.as_ref(),
+            app.local_view_album_cover_hash,
+            cover.width,
+            cover.height,
+            app,
+            '█',
+        );
+        f.render_widget(
+            Paragraph::new(ascii)
+                .style(Style::default().bg(app.theme.color_surface()).fg(app.theme.color_text()))
+                .wrap(Wrap { trim: false }),
+            cover,
+        );
+    }
+
+    // Multi-album prev/next hint bars
+    if app.local_folder_kind == LocalFolderKind::MultiAlbum {
+        let h = cover.height;
+        if h > 0 {
+            if app.local_view_album_index > 0 {
+                // Stick to playlist border (inside)
+                let left = Rect { x: area.x, y: cover.y, width: 1, height: h };
+                let s = (0..h).map(|_| "▒\n").collect::<String>();
+                f.render_widget(
+                    Paragraph::new(s).style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())),
+                    left,
+                );
+            }
+            if app.local_view_album_index + 1 < app.local_album_folders.len() {
+                // Stick to playlist border (inside)
+                let right = Rect { x: area.x + area.width.saturating_sub(1), y: cover.y, width: 1, height: h };
+                let s = (0..h).map(|_| "▒\n").collect::<String>();
+                f.render_widget(
+                    Paragraph::new(s).style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())),
+                    right,
+                );
+            }
+        }
+    }
+}
+
+fn render_separator(f: &mut Frame, area: Rect, app: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())),
+        area,
+    );
+}
+
+fn render_playlist_list(f: &mut Frame, area: Rect, app: &AppState) {
+    // Virtualized rendering to avoid lag on huge playlists.
+    let footer_rows: u16 = 2;
+    let list_rows = area.height.saturating_sub(footer_rows);
+
+    let total = app.playlist_view.items.len();
+    let selected = app.playlist_view.selected.min(total.saturating_sub(1));
+
+    let visible = list_rows as usize;
+    let mut start = 0usize;
+    if visible > 0 && total > visible {
+        // Keep selection within the visible window.
+        if selected >= visible {
+            start = selected + 1 - visible;
+        }
+        // Also clamp to tail.
+        start = start.min(total - visible);
+    }
+    let end = if visible == 0 { 0 } else { (start + visible).min(total) };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if total == 0 {
+        lines.push(Line::styled(
+            "(empty)",
+            Style::default()
+                .fg(app.theme.color_subtext())
+                .bg(app.theme.color_surface()),
+        ));
+    } else {
+        for i in start..end {
+            let it = &app.playlist_view.items[i];
+            let prefix = if app.playlist_view.current == Some(i) { "[>]" } else { "   " };
+            let label = format!("{} {:02}. {}", prefix, i + 1, it.title);
+            let mut style = Style::default()
+                .fg(app.theme.color_text())
+                .bg(app.theme.color_surface());
+            if i == app.playlist_view.selected {
+                style = Style::default()
+                    .fg(app.theme.color_base())
+                    .bg(app.theme.color_accent())
+                    .add_modifier(Modifier::BOLD);
+            }
+            lines.push(Line::styled(label, style));
+        }
+    }
+
+    // No in-panel shortcut hint; see Keys modal.
+
+    let p = Paragraph::new(lines)
+        .style(Style::default().bg(app.theme.color_surface()))
+        .wrap(Wrap { trim: true });
+    f.render_widget(p, area);
+}
+
+fn album_cover_ascii(
+    bytes: Option<&Vec<u8>>,
+    hash: Option<u64>,
+    width: u16,
+    height: u16,
+    app: &AppState,
+    default_ch: char,
+) -> String {
+    if let (Some(bytes), Some(hash)) = (bytes, hash) {
+        let key = CoverKey { hash, width, height };
+        let mut cache = app.cover_cache.borrow_mut();
+        if let Some(s) = cache.get(key) {
+            return s;
+        }
+        if let Some(s) = render_cover_ascii(bytes, width, height) {
+            cache.put(key, s.clone());
+            return s;
+        }
+    }
+
+    let row = default_ch.to_string().repeat(width as usize);
+    let mut s = String::new();
+    for _ in 0..height {
+        s.push_str(&row);
+        s.push('\n');
+    }
+    s
+}
+
+fn compose_slide_cover(
+    width: u16,
+    height: u16,
+    from_ascii: &str,
+    to_ascii: &str,
+    dir: i8,
+    offset: i16,
+) -> String {
+    let w = width as i16;
+    let h = height as usize;
+
+    let mut grid: Vec<Vec<char>> = vec![vec![' '; width as usize]; h];
+    let from_lines = split_lines(from_ascii, h);
+    let to_lines = split_lines(to_ascii, h);
+
+    // Next: dir=-1, both move left. Prev: dir=+1, both move right.
+    let (from_dx, to_dx) = if dir < 0 {
+        (-offset, w - offset)
+    } else {
+        (offset, -w + offset)
+    };
+
+    blit(&mut grid, &from_lines, from_dx);
+    blit(&mut grid, &to_lines, to_dx);
+
+    let mut out = String::with_capacity((width as usize + 1) * h);
+    for row in grid {
+        out.extend(row);
+        out.push('\n');
+    }
+    out
+}
+
+fn split_lines(s: &str, expected: usize) -> Vec<Vec<char>> {
+    let mut out: Vec<Vec<char>> = Vec::with_capacity(expected);
+    for line in s.lines() {
+        out.push(line.chars().collect());
+        if out.len() == expected {
+            break;
+        }
+    }
+    while out.len() < expected {
+        out.push(Vec::new());
+    }
+    out
+}
+
+fn blit(dst: &mut [Vec<char>], src: &[Vec<char>], dx: i16) {
+    let h = dst.len().min(src.len());
+    if h == 0 {
+        return;
+    }
+    let w = dst[0].len() as i16;
+    for y in 0..h {
+        for (x_src, ch) in src[y].iter().enumerate() {
+            let x = x_src as i16 + dx;
+            if x >= 0 && x < w {
+                dst[y][x as usize] = *ch;
+            }
+        }
+    }
+}
 
 pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
     // solid background for playlist overlay
@@ -14,55 +339,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
         .borders(Borders::ALL)
         .border_set(SOLID_BORDER)
         .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()))
-        .title(format!("Playlist ({} tracks)", app.playlist.len()));
+        .title(format!("Playlist ({} tracks)", app.playlist_view.len()));
     f.render_widget(block, area);
 
-    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, it) in app.playlist.items.iter().enumerate() {
-        let prefix = if app.playlist.current == Some(i) { "[>]" } else { "   " };
-        let label = format!("{} {:02}. {}", prefix, i + 1, it.title);
-        let mut style = Style::default()
-            .fg(app.theme.color_text())
-            .bg(app.theme.color_surface());
-        if i == app.playlist.selected {
-            style = Style::default()
-                .fg(app.theme.color_base())
-                .bg(app.theme.color_accent())
-                .add_modifier(Modifier::BOLD);
-        }
-        lines.push(Line::styled(label, style));
-    }
-
-    if lines.is_empty() {
-        lines.push(
-            Line::styled(
-                "(empty)",
-                Style::default()
-                    .fg(app.theme.color_subtext())
-                    .bg(app.theme.color_surface()),
-            ),
-        );
-    }
-
-    // footer hint (as PRD mock)
-    if !lines.is_empty() {
-        lines.push(Line::styled(
-            "",
-            Style::default().bg(app.theme.color_surface()),
-        ));
-        lines.push(Line::styled(
-            "[Enter] Play  [P] Hide",
-            Style::default()
-                .fg(app.theme.color_subtext())
-                .bg(app.theme.color_surface()),
-        ));
-    }
-
-    let p = Paragraph::new(lines)
-        .style(Style::default().bg(app.theme.color_surface()))
-        .wrap(Wrap { trim: true });
-    f.render_widget(p, inner);
+    let l = compute_layout(area, app);
+    render_album_cover(f, l.cover_area, app);
+    render_separator(f, l.separator_area, app);
+    render_playlist_list(f, l.list_area, app);
 }
 

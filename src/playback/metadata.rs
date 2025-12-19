@@ -36,7 +36,7 @@ pub fn read_metadata(path: &Path) -> Result<TrackMetadata> {
 
     // Fallback: local folder cover image near the audio file.
     if meta.cover.is_none() {
-        if let Some((bytes, hash)) = read_folder_cover(path) {
+        if let Some((bytes, hash)) = read_cover_from_folder(path.parent().unwrap_or(Path::new("."))) {
             meta.cover_hash = Some(hash);
             meta.cover = Some(bytes);
         }
@@ -77,8 +77,7 @@ fn read_cover_from_tag(tag: &Tag) -> Option<(Vec<u8>, u64)> {
     Some((bytes, hash))
 }
 
-fn read_folder_cover(audio_path: &Path) -> Option<(Vec<u8>, u64)> {
-    let dir = audio_path.parent()?;
+pub fn read_cover_from_folder(dir: &Path) -> Option<(Vec<u8>, u64)> {
 
     // Common filenames used by many players.
     // Keep this list small and predictable.

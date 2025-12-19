@@ -1,10 +1,11 @@
-use crate::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings, PlaybackState, TrackMetadata};
+use crate::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings, LocalFolderKind, PlaybackState, TrackMetadata};
 use crate::data::playlist::{Playlist, PlaylistItem};
 use crate::playback::metadata::read_metadata;
+use crate::playback::metadata::read_cover_from_folder;
 use anyhow::{anyhow, Result};
 use rodio::{OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,6 +52,12 @@ impl EqParams {
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct OrderFile {
     order: Vec<String>,
+
+    #[serde(default)]
+    last_opened_song: Option<String>,
+
+    #[serde(default)]
+    last_album: Option<String>,
 }
 
 fn order_key(folder: &Path, path: &Path) -> String {
@@ -64,6 +71,18 @@ fn read_order_file(folder: &Path) -> Option<OrderFile> {
     let p = folder.join(".order.toml");
     let s = std::fs::read_to_string(p).ok()?;
     toml::from_str(&s).ok()
+}
+
+fn write_order_file_struct(folder: &Path, of: &OrderFile) -> Result<()> {
+    let content = toml::to_string_pretty(of)?;
+
+    let tmp = folder.join(".order.toml.tmp");
+    let dst = folder.join(".order.toml");
+    std::fs::write(&tmp, content)?;
+    // Best-effort atomic replace.
+    let _ = std::fs::remove_file(&dst);
+    std::fs::rename(&tmp, &dst)?;
+    Ok(())
 }
 
 fn apply_order_file(folder: &Path, playlist: &mut Playlist, order: &OrderFile) {
@@ -114,20 +133,132 @@ fn apply_order_file(folder: &Path, playlist: &mut Playlist, order: &OrderFile) {
 }
 
 pub fn write_order_file(folder: &Path, playlist: &Playlist) -> Result<()> {
-    let order = playlist
+    let mut of = read_order_file(folder).unwrap_or_default();
+    of.order = playlist
         .items
         .iter()
         .map(|it| order_key(folder, &it.path))
         .collect::<Vec<_>>();
-    let content = toml::to_string_pretty(&OrderFile { order })?;
+    write_order_file_struct(folder, &of)
+}
 
-    let tmp = folder.join(".order.toml.tmp");
-    let dst = folder.join(".order.toml");
-    std::fs::write(&tmp, content)?;
-    // Best-effort atomic replace.
-    let _ = std::fs::remove_file(&dst);
-    std::fs::rename(&tmp, &dst)?;
-    Ok(())
+pub fn write_last_opened_song(folder: &Path, song_path: &Path) -> Result<()> {
+    let mut of = read_order_file(folder).unwrap_or_default();
+    of.last_opened_song = Some(order_key(folder, song_path));
+    write_order_file_struct(folder, &of)
+}
+
+pub fn write_last_album(root: &Path, album_folder: &Path) -> Result<()> {
+    let mut of = read_order_file(root).unwrap_or_default();
+    let rel = album_folder.strip_prefix(root).unwrap_or(album_folder);
+    of.last_album = Some(rel.to_string_lossy().replace('\\', "/"));
+    write_order_file_struct(root, &of)
+}
+
+fn apply_last_opened_song(folder: &Path, playlist: &mut Playlist, of: &OrderFile) {
+    let Some(k) = of.last_opened_song.as_ref() else {
+        return;
+    };
+    if let Some(i) = playlist
+        .items
+        .iter()
+        .position(|it| order_key(folder, &it.path) == *k)
+    {
+        playlist.selected = i;
+        playlist.clamp_selected();
+        playlist.set_current_selected();
+    }
+}
+
+#[derive(Debug)]
+pub struct LoadPathResult {
+    pub kind: LocalFolderKind,
+    pub root_folder: PathBuf,
+    pub playback_folder: PathBuf,
+    pub album_folders: Vec<PathBuf>,
+    pub album_index: usize,
+    pub album_cover: Option<(Vec<u8>, u64)>,
+    pub playlist: Playlist,
+    pub track: TrackMetadata,
+}
+
+fn is_hidden_or_order_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.starts_with('.') || s.eq_ignore_ascii_case("thumbs.db"))
+        .unwrap_or(false)
+}
+
+fn detect_album_folder(folder: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(folder) else {
+        return false;
+    };
+
+    let mut has_audio = false;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            return false;
+        }
+        if is_hidden_or_order_file(&p) {
+            continue;
+        }
+
+        if is_audio(&p) {
+            has_audio = true;
+            continue;
+        }
+
+        // allow cover image files named cover.*
+        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+            if stem.eq_ignore_ascii_case("cover") {
+                continue;
+            }
+        }
+
+        // allow external lyrics files
+        if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("lrc")) == Some(true) {
+            continue;
+        }
+
+        // any other file => not an "album folder" per spec
+        return false;
+    }
+
+    has_audio
+}
+
+fn detect_folder_kind(folder: &Path) -> (LocalFolderKind, Vec<PathBuf>) {
+    // Multi-album: no audio at root + has >=1 album subfolder.
+    let mut root_has_audio = false;
+    let mut album_folders: Vec<PathBuf> = Vec::new();
+
+    let Ok(rd) = std::fs::read_dir(folder) else {
+        return (LocalFolderKind::Plain, Vec::new());
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if is_audio(&p) {
+                root_has_audio = true;
+            }
+            continue;
+        }
+        if p.is_dir() {
+            if detect_album_folder(&p) {
+                album_folders.push(p);
+            }
+        }
+    }
+    album_folders.sort();
+
+    if !root_has_audio && !album_folders.is_empty() {
+        return (LocalFolderKind::MultiAlbum, album_folders);
+    }
+    if detect_album_folder(folder) {
+        return (LocalFolderKind::Album, Vec::new());
+    }
+    (LocalFolderKind::Plain, Vec::new())
 }
 
 pub struct LocalPlayer {
@@ -149,6 +280,11 @@ pub struct LocalPlayer {
 
     // visualization tap (last ~16384 samples)
     viz_samples: Arc<VizRing>,
+
+    // metadata cache (avoid expensive tag parsing for cover/lyrics)
+    meta_cache: HashMap<PathBuf, TrackMetadata>,
+    meta_order: VecDeque<PathBuf>,
+    meta_cap: usize,
 }
 
 impl LocalPlayer {
@@ -169,7 +305,35 @@ impl LocalPlayer {
             started_at: None,
             paused_acc: Duration::from_secs(0),
             viz_samples: Arc::new(VizRing::new(16384)),
+
+            meta_cache: HashMap::new(),
+            meta_order: VecDeque::new(),
+            meta_cap: 64,
         }
+    }
+
+    fn cached_metadata(&mut self, path: &Path) -> TrackMetadata {
+        if let Some(m) = self.meta_cache.get(path) {
+            // touch
+            if let Some(pos) = self.meta_order.iter().position(|p| p == path) {
+                let p = self.meta_order.remove(pos).unwrap_or_else(|| path.to_path_buf());
+                self.meta_order.push_back(p);
+            }
+            return m.clone();
+        }
+
+        let meta = read_metadata(path).unwrap_or_default();
+        let key = path.to_path_buf();
+        self.meta_cache.insert(key.clone(), meta.clone());
+        self.meta_order.push_back(key);
+
+        while self.meta_order.len() > self.meta_cap {
+            if let Some(old) = self.meta_order.pop_front() {
+                self.meta_cache.remove(&old);
+            }
+        }
+
+        meta
     }
 
     pub fn set_eq(&mut self, eq: EqSettings) -> Result<()> {
@@ -211,6 +375,11 @@ impl LocalPlayer {
             apply_order_file(&p, &mut playlist, &order);
         }
 
+        // Restore last opened song if present.
+        if let Some(order) = read_order_file(&p) {
+            apply_last_opened_song(&p, &mut playlist, &order);
+        }
+
         // For a freshly loaded folder, start from the top of the (possibly re-ordered) list.
         playlist.selected = 0;
 
@@ -225,12 +394,99 @@ impl LocalPlayer {
         }
     }
 
+    pub fn load_path(&mut self, folder: &Path) -> Result<LoadPathResult> {
+        let folder = folder.to_path_buf();
+        if !folder.exists() {
+            return Err(anyhow!("not found"));
+        }
+
+        let (kind, album_folders) = detect_folder_kind(&folder);
+        match kind {
+            LocalFolderKind::Plain | LocalFolderKind::Album => {
+                let (playlist, track) = self.load_folder(folder.to_string_lossy().as_ref())?;
+                let cover = read_cover_from_folder(&folder);
+                Ok(LoadPathResult {
+                    kind,
+                    root_folder: folder.clone(),
+                    playback_folder: folder,
+                    album_folders: Vec::new(),
+                    album_index: 0,
+                    album_cover: cover,
+                    playlist,
+                    track,
+                })
+            }
+            LocalFolderKind::MultiAlbum => {
+                let of = read_order_file(&folder).unwrap_or_default();
+                let mut album_index = 0usize;
+                if let Some(last) = of.last_album.as_ref() {
+                    if let Some(i) = album_folders.iter().position(|p| {
+                        let rel = p.strip_prefix(&folder).unwrap_or(p);
+                        rel.to_string_lossy().replace('\\', "/") == *last
+                    }) {
+                        album_index = i;
+                    }
+                }
+                let playback_folder = album_folders
+                    .get(album_index)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("no album folders"))?;
+
+                let (playlist, track) = self.load_folder(playback_folder.to_string_lossy().as_ref())?;
+                let cover = read_cover_from_folder(&playback_folder);
+                Ok(LoadPathResult {
+                    kind,
+                    root_folder: folder,
+                    playback_folder,
+                    album_folders,
+                    album_index,
+                    album_cover: cover,
+                    playlist,
+                    track,
+                })
+            }
+        }
+    }
+
+    pub fn load_playlist_only(&mut self, folder: &Path, restore_last_opened: bool) -> Result<Playlist> {
+        let p = folder.to_path_buf();
+        let mut playlist = Playlist::default();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&p)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && is_audio(&path) {
+                files.push(path);
+            }
+        }
+        files.sort();
+
+        for path in files {
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            playlist.items.push(PlaylistItem { path, title });
+        }
+
+        if let Some(order) = read_order_file(&p) {
+            apply_order_file(&p, &mut playlist, &order);
+            if restore_last_opened {
+                apply_last_opened_song(&p, &mut playlist, &order);
+            }
+        }
+
+        playlist.clamp_selected();
+        Ok(playlist)
+    }
+
     pub fn play_file(&mut self, path: &Path) -> Result<TrackMetadata> {
         // stop current (avoid blocking rebuilds; keep the sink and just clear sources)
         self.sink.clear();
 
         // metadata
-        let meta = read_metadata(path).unwrap_or_default();
+        let meta = self.cached_metadata(path);
         self.duration = Some(meta.duration);
         self.current_path = Some(path.to_path_buf());
 

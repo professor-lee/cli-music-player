@@ -1,5 +1,5 @@
 use crate::app::mode_manager::ModeManager;
-use crate::app::state::{AppState, CoverSnapshot, Overlay, PlayMode, PlaybackState, RepeatMode};
+use crate::app::state::{AppState, CoverSnapshot, LocalFolderKind, Overlay, PlayMode, PlaybackState, RepeatMode};
 use crate::audio::capture::AudioCapture;
 use crate::audio::cava::CavaRunner;
 use crate::audio::spectrum::SpectrumProcessor;
@@ -15,6 +15,14 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
+
+fn sync_playlists_when_viewing_playback(app: &mut AppState) {
+    if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
+        if app.local_view_album_folder.as_ref() == app.local_folder.as_ref() {
+            app.playlist = app.playlist_view.clone();
+        }
+    }
+}
 
 pub fn run(app: &mut AppState) -> Result<()> {
     enable_raw_mode()?;
@@ -223,6 +231,10 @@ fn handle_local_track_finished(app: &mut AppState, mode_manager: &mut ModeManage
             app.player.track = track;
             let to = CoverSnapshot::from(&app.player.track);
             app.start_cover_anim(from, to, -1, Instant::now());
+
+            if let Some(folder) = app.local_folder.as_deref() {
+                let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
+            }
         }
         Err(e) => {
             app.player.playback = PlaybackState::Stopped;
@@ -317,9 +329,28 @@ fn handle_action(
                 app.overlay = Overlay::None;
             } else {
                 // 需求：打开 playlist 时聚焦当前播放的歌曲。
+                app.playlist_view = app.playlist.clone();
                 if let Some(cur) = app.playlist.current {
-                    app.playlist.selected = cur;
-                    app.playlist.clamp_selected();
+                    app.playlist_view.selected = cur;
+                    app.playlist_view.clamp_selected();
+                }
+
+                // Always reset view state to the currently playing folder when opening.
+                app.local_view_album_folder = app.local_folder.clone();
+                if let Some(folder) = app.local_folder.as_deref() {
+                    let cover = crate::playback::metadata::read_cover_from_folder(folder);
+                    app.local_view_album_cover = cover.as_ref().map(|(b, _)| b.clone());
+                    app.local_view_album_cover_hash = cover.map(|(_, h)| Some(h)).unwrap_or(None);
+                }
+                app.playlist_album_anim = None;
+
+                // Keep view album index in sync for MultiAlbum.
+                if app.local_folder_kind == LocalFolderKind::MultiAlbum {
+                    if let Some(vf) = app.local_view_album_folder.as_ref() {
+                        if let Some(i) = app.local_album_folders.iter().position(|p| p == vf) {
+                            app.local_view_album_index = i;
+                        }
+                    }
                 }
                 app.overlay = Overlay::Playlist;
                 app.playlist_slide_x = -(layout.left_width as i16);
@@ -334,12 +365,14 @@ fn handle_action(
                     if folder.is_empty() {
                         return Ok(());
                     }
-                    match mode_manager.local.load_folder(&folder) {
-                        Ok((playlist, first_track)) => {
+                    let p = PathBuf::from(&folder);
+                    match mode_manager.local.load_path(&p) {
+                        Ok(res) => {
                             mode_manager.pause_other(PlayMode::LocalPlayback);
                             app.player.mode = PlayMode::LocalPlayback;
-                            app.playlist = playlist;
-                            app.player.track = first_track;
+                            app.playlist = res.playlist;
+                            app.playlist_view = app.playlist.clone();
+                            app.player.track = res.track;
                             app.player.volume = mode_manager.local.volume();
                             app.player.playback = mode_manager.local.playback_state();
 
@@ -347,7 +380,25 @@ fn handle_action(
                             app.eq.bands_db = app.config.eq_bands_db;
                             let _ = mode_manager.local.set_eq(app.eq);
 
-                            app.local_folder = Some(PathBuf::from(folder));
+                            app.local_folder = Some(res.playback_folder.clone());
+                            app.local_root_folder = Some(res.root_folder);
+                            app.local_folder_kind = res.kind;
+                            app.local_album_folders = res.album_folders;
+                            app.local_view_album_index = res.album_index;
+                            app.local_view_album_folder = Some(res.playback_folder);
+
+                            app.local_view_album_cover = res.album_cover.as_ref().map(|(b, _)| b.clone());
+                            app.local_view_album_cover_hash = res.album_cover.map(|(_, h)| Some(h)).unwrap_or(None);
+
+                            // Ensure .order.toml exists and tracks last album/song for local browsing.
+                            if app.local_folder_kind == LocalFolderKind::MultiAlbum {
+                                if let (Some(root), Some(play_folder)) = (app.local_root_folder.as_deref(), app.local_folder.as_deref()) {
+                                    let _ = crate::playback::local_player::write_last_album(root, play_folder);
+                                }
+                            }
+                            if let (Some(play_folder), Some(cur_path)) = (app.local_folder.as_deref(), app.playlist.current_path().cloned()) {
+                                let _ = crate::playback::local_player::write_last_opened_song(play_folder, &cur_path);
+                            }
                         }
                         Err(e) => {
                             app.set_toast(format!("Folder error: {e}"));
@@ -355,11 +406,24 @@ fn handle_action(
                     }
                 }
                 Overlay::Playlist => {
-                    app.playlist.set_current_selected();
-                    if let Some(path) = app.playlist.current_path().cloned() {
+                    app.playlist_view.set_current_selected();
+                    if let Some(path) = app.playlist_view.current_path().cloned() {
+                        let view_folder = app.local_view_album_folder.clone();
                         if let Ok(track) = mode_manager.local.play_file(&path) {
                             app.player.mode = PlayMode::LocalPlayback;
                             app.player.track = track;
+
+                            if let Some(folder) = view_folder {
+                                app.local_folder = Some(folder.clone());
+                                app.playlist = app.playlist_view.clone();
+                                let _ = crate::playback::local_player::write_last_opened_song(&folder, &path);
+
+                                if app.local_folder_kind == LocalFolderKind::MultiAlbum {
+                                    if let Some(root) = app.local_root_folder.as_deref() {
+                                        let _ = crate::playback::local_player::write_last_album(root, &folder);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -387,30 +451,93 @@ fn handle_action(
             }
         }
         Action::PlaylistUp => {
-            app.playlist.move_up();
-            app.playlist.clamp_selected();
+            app.playlist_view.move_up();
+            app.playlist_view.clamp_selected();
+            sync_playlists_when_viewing_playback(app);
         }
         Action::PlaylistDown => {
-            app.playlist.move_down();
-            app.playlist.clamp_selected();
+            app.playlist_view.move_down();
+            app.playlist_view.clamp_selected();
+            sync_playlists_when_viewing_playback(app);
         }
         Action::PlaylistMoveItemUp => {
             if app.overlay == Overlay::Playlist && app.player.mode == PlayMode::LocalPlayback {
-                if app.playlist.move_selected_item_up() {
-                    if let Some(folder) = app.local_folder.as_deref() {
-                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist) {
+                if app.playlist_view.move_selected_item_up() {
+                    if let Some(folder) = app.local_view_album_folder.as_deref() {
+                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist_view) {
                             app.set_toast(format!("Order save error: {e}"));
                         }
                     }
+                    sync_playlists_when_viewing_playback(app);
                 }
             }
         }
         Action::PlaylistMoveItemDown => {
             if app.overlay == Overlay::Playlist && app.player.mode == PlayMode::LocalPlayback {
-                if app.playlist.move_selected_item_down() {
-                    if let Some(folder) = app.local_folder.as_deref() {
-                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist) {
+                if app.playlist_view.move_selected_item_down() {
+                    if let Some(folder) = app.local_view_album_folder.as_deref() {
+                        if let Err(e) = crate::playback::local_player::write_order_file(folder, &app.playlist_view) {
                             app.set_toast(format!("Order save error: {e}"));
+                        }
+                    }
+                    sync_playlists_when_viewing_playback(app);
+                }
+            }
+        }
+        Action::PrevAlbum | Action::NextAlbum => {
+            if app.overlay == Overlay::Playlist
+                && app.player.mode == PlayMode::LocalPlayback
+                && app.local_folder_kind == LocalFolderKind::MultiAlbum
+                && !app.local_album_folders.is_empty()
+            {
+                let count = app.local_album_folders.len();
+                let mut idx = app.local_view_album_index;
+                match action {
+                    Action::PrevAlbum => {
+                        if idx > 0 {
+                            idx -= 1;
+                        }
+                    }
+                    Action::NextAlbum => {
+                        if idx + 1 < count {
+                            idx += 1;
+                        }
+                    }
+                    _ => {}
+                }
+
+                if idx != app.local_view_album_index {
+                    let from_cover = app.local_view_album_cover.clone();
+                    let from_hash = app.local_view_album_cover_hash;
+
+                    app.local_view_album_index = idx;
+                    let folder = app.local_album_folders[idx].clone();
+                    if let Ok(mut pl) = mode_manager.local.load_playlist_only(&folder, false) {
+                        pl.selected = 0;
+                        pl.current = None;
+                        pl.clamp_selected();
+                        app.playlist_view = pl;
+                        app.local_view_album_folder = Some(folder.clone());
+
+                        let cover = crate::playback::metadata::read_cover_from_folder(&folder);
+                        app.local_view_album_cover = cover.as_ref().map(|(b, _)| b.clone());
+                        app.local_view_album_cover_hash = cover.map(|(_, h)| Some(h)).unwrap_or(None);
+
+                        // Start cover slide animation (playlist overlay)
+                        let dir = if action == Action::NextAlbum { -1 } else { 1 };
+                        app.playlist_album_anim = Some(crate::app::state::PlaylistAlbumAnim {
+                            from_cover,
+                            from_hash,
+                            to_cover: app.local_view_album_cover.clone(),
+                            to_hash: app.local_view_album_cover_hash,
+                            dir,
+                            started_at: Instant::now(),
+                            duration: Duration::from_millis(220),
+                        });
+
+                        // Record last visited album even if not playing.
+                        if let Some(root) = app.local_root_folder.as_deref() {
+                            let _ = crate::playback::local_player::write_last_album(root, &folder);
                         }
                     }
                 }
@@ -475,22 +602,23 @@ fn handle_action(
             }
         }
         Action::PlaylistSelect(idx) => {
-            if idx < app.playlist.len() {
-                app.playlist.selected = idx;
-                app.playlist.clamp_selected();
+            if idx < app.playlist_view.len() {
+                app.playlist_view.selected = idx;
+                app.playlist_view.clamp_selected();
+                sync_playlists_when_viewing_playback(app);
 
                 // double click => play
                 let now = Instant::now();
                 if let Some((at, last_col, last_row)) = app.last_mouse_click {
                     if now.duration_since(at) <= Duration::from_millis(400) {
                         // same row (best-effort)
-                        if last_row == (layout.playlist_inner.y + idx as u16) {
+                        if last_row == (layout.playlist_list_inner.y + idx as u16) {
                             return handle_action(app, mode_manager, system_volume, Action::Confirm, layout);
                         }
                         let _ = last_col;
                     }
                 }
-                app.last_mouse_click = Some((now, 0, layout.playlist_inner.y + idx as u16));
+                app.last_mouse_click = Some((now, 0, layout.playlist_list_inner.y + idx as u16));
             }
         }
         Action::TogglePlayPause => {
@@ -532,6 +660,10 @@ fn handle_action(
                             app.player.track = track;
                             let to = CoverSnapshot::from(&app.player.track);
                             app.start_cover_anim(from, to, 1, Instant::now());
+
+                            if let Some(folder) = app.local_folder.as_deref() {
+                                let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
+                            }
                         }
                     }
                 }
@@ -558,6 +690,10 @@ fn handle_action(
                             app.player.track = track;
                             let to = CoverSnapshot::from(&app.player.track);
                             app.start_cover_anim(from, to, -1, Instant::now());
+
+                            if let Some(folder) = app.local_folder.as_deref() {
+                                let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
+                            }
                         }
                     }
                 }

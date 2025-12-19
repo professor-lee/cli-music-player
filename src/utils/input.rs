@@ -37,6 +37,9 @@ pub enum Action {
     PlaylistMoveItemDown,
     PlaylistSelect(usize),
 
+    PrevAlbum,
+    NextAlbum,
+
     SeekToFraction(f32),
 
     FolderChar(char),
@@ -49,6 +52,11 @@ pub enum Action {
 
 pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
     if overlay == Overlay::FolderInput {
+        if ev.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(ev.code, KeyCode::Char('f') | KeyCode::Char('F'))
+        {
+            return Action::CloseOverlay;
+        }
         match ev.code {
             KeyCode::Esc => return Action::CloseOverlay,
             KeyCode::Enter => return Action::Confirm,
@@ -67,6 +75,7 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
     if overlay == Overlay::SettingsModal {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Char('t') | KeyCode::Char('T') => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
             KeyCode::Up => Action::ModalUp,
             KeyCode::Down => Action::ModalDown,
@@ -86,6 +95,7 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
 
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Char('e') | KeyCode::Char('E') => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
             KeyCode::Up => Action::ModalUp,
             KeyCode::Down => Action::ModalDown,
@@ -96,6 +106,11 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
     }
 
     if overlay == Overlay::HelpModal {
+        if ev.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(ev.code, KeyCode::Char('k') | KeyCode::Char('K'))
+        {
+            return Action::CloseOverlay;
+        }
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             _ => Action::None,
@@ -123,6 +138,20 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
             KeyCode::Char('p') | KeyCode::Char('P') => Action::TogglePlaylist,
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
+            KeyCode::Left => {
+                if ev.modifiers.contains(KeyModifiers::CONTROL) {
+                    Action::PrevAlbum
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Right => {
+                if ev.modifiers.contains(KeyModifiers::CONTROL) {
+                    Action::NextAlbum
+                } else {
+                    Action::None
+                }
+            }
             KeyCode::Up => {
                 if ev.modifiers.contains(KeyModifiers::CONTROL) {
                     Action::PlaylistMoveItemUp

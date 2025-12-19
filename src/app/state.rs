@@ -121,6 +121,18 @@ pub struct CoverAnim {
     pub duration: Duration,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlaylistAlbumAnim {
+    pub from_cover: Option<Vec<u8>>,
+    pub from_hash: Option<u64>,
+    pub to_cover: Option<Vec<u8>>,
+    pub to_hash: Option<u64>,
+    // -1 => slide left (next), +1 => slide right (prev)
+    pub dir: i8,
+    pub started_at: Instant,
+    pub duration: Duration,
+}
+
 impl Default for TrackMetadata {
     fn default() -> Self {
         Self {
@@ -185,6 +197,13 @@ pub enum Overlay {
     EqModal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFolderKind {
+    Plain,
+    Album,
+    MultiAlbum,
+}
+
 #[derive(Debug)]
 pub struct FolderInput {
     pub buf: String,
@@ -203,6 +222,10 @@ pub struct AppState {
 
     pub player: PlayerState,
     pub playlist: Playlist,
+
+    // Playlist overlay browsing list.
+    // For MultiAlbum, this can differ from `playlist` (playback queue).
+    pub playlist_view: Playlist,
     pub spectrum: SpectrumData,
 
     pub cover_cache: RefCell<CoverCache>,
@@ -215,7 +238,24 @@ pub struct AppState {
     pub eq: EqSettings,
     pub eq_selected: usize,
 
+    // Folder that backs the *current playback queue* (contains audio files).
     pub local_folder: Option<PathBuf>,
+
+    // For MultiAlbum: the root folder containing multiple album folders.
+    pub local_root_folder: Option<PathBuf>,
+    pub local_folder_kind: LocalFolderKind,
+
+    // For MultiAlbum: all album folders under `local_root_folder`.
+    pub local_album_folders: Vec<PathBuf>,
+    // Which album folder is currently being *viewed* in the playlist overlay.
+    pub local_view_album_index: usize,
+    pub local_view_album_folder: Option<PathBuf>,
+
+    // Album cover shown in the playlist overlay's top area.
+    pub local_view_album_cover: Option<Vec<u8>>,
+    pub local_view_album_cover_hash: Option<u64>,
+
+    pub playlist_album_anim: Option<PlaylistAlbumAnim>,
 
     pub cover_anim: Option<CoverAnim>,
     pub pending_system_cover_anim: Option<(CoverSnapshot, i8, Instant)>,
@@ -239,6 +279,7 @@ impl AppState {
             theme,
             player: PlayerState::default(),
             playlist: Playlist::default(),
+            playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
             overlay: Overlay::None,
@@ -249,6 +290,15 @@ impl AppState {
             eq_selected: 0,
 
             local_folder: None,
+            local_root_folder: None,
+            local_folder_kind: LocalFolderKind::Plain,
+            local_album_folders: Vec::new(),
+            local_view_album_index: 0,
+            local_view_album_folder: None,
+            local_view_album_cover: None,
+            local_view_album_cover_hash: None,
+
+            playlist_album_anim: None,
 
             cover_anim: None,
             pending_system_cover_anim: None,
@@ -270,6 +320,12 @@ impl AppState {
         if let Some(anim) = &self.cover_anim {
             if now.duration_since(anim.started_at) >= anim.duration {
                 self.cover_anim = None;
+            }
+        }
+
+        if let Some(anim) = &self.playlist_album_anim {
+            if now.duration_since(anim.started_at) >= anim.duration {
+                self.playlist_album_anim = None;
             }
         }
 
