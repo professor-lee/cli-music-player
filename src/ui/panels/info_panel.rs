@@ -1,6 +1,5 @@
 use crate::app::state::{AppState, CoverSnapshot, PlayMode};
 use crate::render::cover_cache::CoverKey;
-use crate::render::cover_renderer::{render_cover_ascii, COVER_CHARSET};
 use crate::ui::components::{control_buttons, progress_bar, volume_bar};
 use crate::ui::borders::SOLID_BORDER;
 use crate::utils::timefmt;
@@ -81,7 +80,7 @@ pub fn layout(area: Rect) -> InfoPanelLayout {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
+pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     let b = Block::default()
         .borders(Borders::ALL)
         .border_set(SOLID_BORDER)
@@ -93,10 +92,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
 
     // cover (animated as a whole: content + border)
     if l.cover.width > 0 && l.cover.height > 0 {
-        let mut cache = app.cover_cache.borrow_mut();
         let show_border = app.config.album_border;
 
-        if let Some(anim) = &app.cover_anim {
+        if let Some(anim) = app.cover_anim.take() {
             let p = (app
                 .last_frame
                 .duration_since(anim.started_at)
@@ -106,7 +104,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             let offset = (p * l.cover.width as f32).round() as i16;
 
             let (from_box, from_fg) = cover_box_ascii_for_snapshot(
-                &mut cache,
                 &anim.from,
                 l.cover.width,
                 l.cover.height,
@@ -114,7 +111,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
                 app,
             );
             let (to_box, to_fg) = cover_box_ascii_for_snapshot(
-                &mut cache,
                 &anim.to,
                 l.cover.width,
                 l.cover.height,
@@ -125,10 +121,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
             let composed = compose_slide_cover(l.cover.width, l.cover.height, &from_box, &to_box, anim.dir, offset);
             let fg = if to_fg == app.theme.color_text() { to_fg } else { from_fg };
             f.render_widget(Paragraph::new(composed).style(Style::default().fg(fg)), l.cover);
+
+            // restore animation (lifetime managed in tick)
+            app.cover_anim = Some(anim);
         } else {
             let snap = CoverSnapshot::from(&app.player.track);
             let (box_ascii, fg) = cover_box_ascii_for_snapshot(
-                &mut cache,
                 &snap,
                 l.cover.width,
                 l.cover.height,
@@ -202,12 +200,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn cover_box_ascii_for_snapshot(
-    cache: &mut crate::render::cover_cache::CoverCache,
     snap: &CoverSnapshot,
     width: u16,
     height: u16,
     show_border: bool,
-    app: &AppState,
+    app: &mut AppState,
 ) -> (String, ratatui::style::Color) {
     if width == 0 || height == 0 {
         return (String::new(), app.theme.color_subtext());
@@ -248,7 +245,7 @@ fn cover_box_ascii_for_snapshot(
         (0usize, 0usize, width as usize, height as usize)
     };
 
-    let (inner_ascii, fg) = cover_ascii_for_snapshot(cache, snap, inner_w as u16, inner_h as u16, app);
+    let (inner_ascii, fg) = cover_ascii_for_snapshot(snap, inner_w as u16, inner_h as u16, app);
     let inner_lines = split_lines(&inner_ascii, inner_h);
     blit_xy(&mut grid, &inner_lines, inner_x as i16, inner_y as i16);
 
@@ -277,36 +274,51 @@ fn hash_snapshot_seed(s: &CoverSnapshot) -> u64 {
 }
 
 fn cover_ascii_for_snapshot(
-    cache: &mut crate::render::cover_cache::CoverCache,
     snap: &CoverSnapshot,
     width: u16,
     height: u16,
-    app: &AppState,
+    app: &mut AppState,
 ) -> (String, ratatui::style::Color) {
     if let (Some(bytes), Some(hash)) = (snap.cover.as_deref(), snap.cover_hash) {
         let key = CoverKey { hash, width, height };
-        let ascii = match cache.get(key) {
+        let cached = { app.cover_cache.borrow_mut().get(key) };
+        let ascii = match cached {
             Some(s) => s,
             None => {
-                let s = render_cover_ascii(bytes, width, height).unwrap_or_default();
-                cache.put(key, s.clone());
-                cache.get(key).unwrap_or_default()
+                // Avoid heavy render on UI thread; enqueue background render and
+                // return a cheap placeholder for this frame.
+                app.queue_cover_ascii_render(key, bytes, '░');
+                fill_ascii(width, height, '░')
             }
         };
         (ascii, app.theme.color_text())
     } else {
         let seed = hash_snapshot_seed(snap);
         let key = CoverKey { hash: seed, width, height };
-        let ascii = match cache.get(key) {
+        let cached = { app.cover_cache.borrow_mut().get(key) };
+        let ascii = match cached {
             Some(s) => s,
             None => {
                 let s = generate_random_cover_ascii(width, height, seed);
-                cache.put(key, s.clone());
-                cache.get(key).unwrap_or_default()
+                {
+                    let mut cache = app.cover_cache.borrow_mut();
+                    cache.put(key, s);
+                    cache.get(key).unwrap_or_default()
+                }
             }
         };
         (ascii, app.theme.color_subtext())
     }
+}
+
+fn fill_ascii(width: u16, height: u16, ch: char) -> String {
+    let row = ch.to_string().repeat(width as usize);
+    let mut s = String::new();
+    for _ in 0..height {
+        s.push_str(&row);
+        s.push('\n');
+    }
+    s
 }
 
 fn compose_slide_cover(
@@ -397,20 +409,15 @@ fn blit_xy(dst: &mut [Vec<char>], src: &[Vec<char>], dx: i16, dy: i16) {
 }
 
 fn generate_random_cover_ascii(width: u16, height: u16, seed: u64) -> String {
+    // Requirement: when the app has no response / no album cover available,
+    // use a consistent solid fill instead of random characters.
+    let _ = seed;
     let w = width as usize;
     let h = height as usize;
-    let charset: Vec<char> = COVER_CHARSET.chars().collect();
     let mut out = String::with_capacity((w + 1) * h);
-
-    let mut x = (seed as u32).wrapping_add(0x9E37_79B9);
     for _y in 0..h {
         for _x in 0..w {
-            // xorshift32
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            let idx = (x as usize) % charset.len();
-            out.push(charset[idx]);
+            out.push('░');
         }
         out.push('\n');
     }

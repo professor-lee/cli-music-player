@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/Platform-Linux-informational" alt="Platform">
   <img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License">
+  <img src="https://img.shields.io/github/stars/professor-lee/cli-music-player?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
 </p>
 
 <h2 align="center">项目概述</h2>
@@ -71,8 +72,11 @@ cargo build --release
 ./target/release/cli-music-player
 ```
 
-如果你把可执行文件移出仓库目录运行（或做成发行包），请确保程序能找到资源目录：`themes/` 与 `config/`。
-你可以设置环境变量 `CLI_MUSIC_PLAYER_ASSET_DIR` 指向包含它们的目录（通常是项目根目录）。
+首次运行时，程序会在系统配置目录下自动创建（若缺失）配置与主题文件：
+
+- Linux：`$XDG_CONFIG_HOME/cli-music-player`（通常是 `~/.config/cli-music-player`）
+
+也可以用环境变量 `CLI_MUSIC_PLAYER_ASSET_DIR` 覆盖根目录（该目录下仍使用 `config/` 与 `themes/` 子目录）。
 
 <h2 align="center">频谱可视化（cava）</h2>
 
@@ -159,8 +163,13 @@ cargo build --release
 
 <h2 align="center">配置</h2>
 
-- `config/default.toml`：UI/频谱/MPRIS 等配置
-- `themes/*.toml`：主题定义（Catppuccin）
+- `config/default.toml`：UI/频谱/MPRIS + 均衡器（EQ）等配置
+- `themes/*.toml`：主题定义
+
+默认位置（Linux）：
+
+- `~/.config/cli-music-player/config/default.toml`
+- `~/.config/cli-music-player/themes/*.toml`
 
 <h2 align="center">快捷键</h2>
 
@@ -174,11 +183,20 @@ cargo build --release
 | `Left` / `Right` | 上一首 / 下一首 |
 | `Up` / `Down` | 音量加 / 减 |
 | `E` | 打开均衡器（仅本地） |
+| `Alt+R` | 重置均衡器为默认值（在 EQ 弹窗内） |
 | `M` | 切换重复模式（仅本地） |
 | `T` | 打开 Settings |
 | `Ctrl+K` | 打开 Keys（帮助） |
+| `Enter` | 确认（文件夹输入 / 播放列表） |
 | `Q` | 退出 |
 | `Esc` | 关闭弹窗/侧边栏 |
+
+播放列表打开时：
+
+| 按键 | 功能 |
+|---|---|
+| `Ctrl+Up` / `Ctrl+Down` | 将选中项上移 / 下移 |
+| `Ctrl+Left` / `Ctrl+Right` | 上一个 / 下一个专辑（MultiAlbum） |
 
 ---
 

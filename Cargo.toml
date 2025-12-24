@@ -28,6 +28,7 @@ rustfft = "6.1"
 lofty = "0.18"
 image = "0.24"
 unicode-width = "0.1"
+directories = "6.0.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris = "2.0"

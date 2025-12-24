@@ -2,7 +2,6 @@ use crate::app::state::AppState;
 use crate::app::state::{LocalFolderKind, Overlay, PlayMode};
 use crate::ui::borders::SOLID_BORDER;
 use crate::render::cover_cache::CoverKey;
-use crate::render::cover_renderer::render_cover_ascii;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -68,7 +67,7 @@ fn cover_rect_in_area(area: Rect) -> Rect {
     Rect { x, y, width: cover_w, height: cover_h }
 }
 
-fn render_album_cover(f: &mut Frame, area: Rect, app: &AppState) {
+fn render_album_cover(f: &mut Frame, area: Rect, app: &mut AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -100,7 +99,7 @@ fn render_album_cover(f: &mut Frame, area: Rect, app: &AppState) {
     }
 
     // Render slide animation when switching albums in MultiAlbum.
-    if let Some(anim) = &app.playlist_album_anim {
+    if let Some(anim) = app.playlist_album_anim.take() {
         let now = app.last_frame;
         let p = (now.duration_since(anim.started_at).as_secs_f32() / anim.duration.as_secs_f32())
             .clamp(0.0, 1.0);
@@ -130,15 +129,21 @@ fn render_album_cover(f: &mut Frame, area: Rect, app: &AppState) {
                 .wrap(Wrap { trim: false }),
             cover,
         );
+
+        // restore animation (lifetime managed in tick)
+        app.playlist_album_anim = Some(anim);
     } else {
+        let current_cover = app.local_view_album_cover.take();
+        let current_hash = app.local_view_album_cover_hash;
         let ascii = album_cover_ascii(
-            app.local_view_album_cover.as_ref(),
-            app.local_view_album_cover_hash,
+            current_cover.as_ref(),
+            current_hash,
             cover.width,
             cover.height,
             app,
             '█',
         );
+        app.local_view_album_cover = current_cover;
         f.render_widget(
             Paragraph::new(ascii)
                 .style(Style::default().bg(app.theme.color_surface()).fg(app.theme.color_text()))
@@ -244,7 +249,7 @@ fn album_cover_ascii(
     hash: Option<u64>,
     width: u16,
     height: u16,
-    app: &AppState,
+    app: &mut AppState,
     default_ch: char,
 ) -> String {
     if let (Some(bytes), Some(hash)) = (bytes, hash) {
@@ -253,10 +258,12 @@ fn album_cover_ascii(
         if let Some(s) = cache.get(key) {
             return s;
         }
-        if let Some(s) = render_cover_ascii(bytes, width, height) {
-            cache.put(key, s.clone());
-            return s;
-        }
+        drop(cache);
+
+        // Avoid heavy image resize + ASCII conversion on the UI thread.
+        // Enqueue background render; show a placeholder this frame.
+        // (The cache will be filled on a later tick.)
+        app.queue_cover_ascii_render(key, bytes, default_ch);
     }
 
     let row = default_ch.to_string().repeat(width as usize);
@@ -331,7 +338,7 @@ fn blit(dst: &mut [Vec<char>], src: &[Vec<char>], dx: i16) {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
+pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     // solid background for playlist overlay
     f.render_widget(ratatui::widgets::Clear, area);
 

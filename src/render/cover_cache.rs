@@ -29,6 +29,10 @@ impl CoverCache {
         Some(val)
     }
 
+    pub fn contains(&self, key: CoverKey) -> bool {
+        self.map.contains_key(&key)
+    }
+
     pub fn put(&mut self, key: CoverKey, val: String) {
         if self.map.contains_key(&key) {
             self.map.insert(key, val);

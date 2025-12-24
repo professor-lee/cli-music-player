@@ -1,9 +1,14 @@
 use crate::data::config::Config;
 use crate::data::playlist::Playlist;
 use crate::render::cover_cache::CoverCache;
+use crate::render::cover_cache::CoverKey;
+use crate::render::cover_renderer::render_cover_ascii;
 use crate::ui::theme::Theme;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +235,10 @@ pub struct AppState {
 
     pub cover_cache: RefCell<CoverCache>,
 
+    cover_render_tx: Sender<CoverRenderRequest>,
+    cover_render_rx: Receiver<CoverRenderResult>,
+    cover_render_inflight: HashSet<CoverKey>,
+
     pub overlay: Overlay,
     pub folder_input: FolderInput,
 
@@ -272,8 +281,42 @@ pub struct AppState {
     pub last_frame: Instant,
 }
 
+#[derive(Debug)]
+struct CoverRenderRequest {
+    key: CoverKey,
+    bytes: Vec<u8>,
+    placeholder: char,
+}
+
+#[derive(Debug)]
+struct CoverRenderResult {
+    key: CoverKey,
+    ascii: String,
+}
+
+fn fill_ascii(width: u16, height: u16, ch: char) -> String {
+    let row = ch.to_string().repeat(width as usize);
+    let mut s = String::new();
+    for _ in 0..height {
+        s.push_str(&row);
+        s.push('\n');
+    }
+    s
+}
+
 impl AppState {
     pub fn new(config: Config, theme: Theme) -> Self {
+        let (cover_render_tx, cover_render_req_rx) = mpsc::channel::<CoverRenderRequest>();
+        let (cover_render_res_tx, cover_render_rx) = mpsc::channel::<CoverRenderResult>();
+
+        std::thread::spawn(move || {
+            while let Ok(req) = cover_render_req_rx.recv() {
+                let ascii = render_cover_ascii(&req.bytes, req.key.width, req.key.height)
+                    .unwrap_or_else(|| fill_ascii(req.key.width, req.key.height, req.placeholder));
+                let _ = cover_render_res_tx.send(CoverRenderResult { key: req.key, ascii });
+            }
+        });
+
         Self {
             config,
             theme,
@@ -282,6 +325,9 @@ impl AppState {
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
+            cover_render_tx,
+            cover_render_rx,
+            cover_render_inflight: HashSet::new(),
             overlay: Overlay::None,
             folder_input: FolderInput::default(),
             settings_selected: 0,
@@ -314,8 +360,34 @@ impl AppState {
         self.toast = Some((msg.into(), Instant::now()));
     }
 
+    pub fn queue_cover_ascii_render(&mut self, key: CoverKey, bytes: &[u8], placeholder: char) {
+        if self.cover_cache.borrow().contains(key) {
+            return;
+        }
+        if self.cover_render_inflight.contains(&key) {
+            return;
+        }
+        self.cover_render_inflight.insert(key);
+        let _ = self.cover_render_tx.send(CoverRenderRequest {
+            key,
+            bytes: bytes.to_vec(),
+            placeholder,
+        });
+    }
+
     pub fn tick(&mut self, now: Instant) {
         self.last_frame = now;
+
+        loop {
+            match self.cover_render_rx.try_recv() {
+                Ok(msg) => {
+                    self.cover_render_inflight.remove(&msg.key);
+                    self.cover_cache.borrow_mut().put(msg.key, msg.ascii);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
 
         if let Some(anim) = &self.cover_anim {
             if now.duration_since(anim.started_at) >= anim.duration {

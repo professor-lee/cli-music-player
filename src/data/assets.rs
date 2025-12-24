@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use directories::BaseDirs;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,14 +19,14 @@ pub fn resolve_asset_root() -> PathBuf {
     }
 
     if let Some(sys) = system_config_root() {
-        // 需求：优先检测系统配置文件夹；若没有文件，则改为当前目录生成 .config
-        if sys.join("config/default.toml").is_file() {
-            // best-effort: ensure themes exist alongside config
-            let _ = ensure_themes(&sys);
-            return sys;
-        }
+        // Always use the OS-level config directory: <config_dir>/cli-music-player
+        // Best-effort migration from legacy local .config, to avoid losing prior settings.
+        let _ = migrate_legacy_local_assets(&sys);
+        let _ = ensure_all_assets(&sys);
+        return sys;
     }
 
+    // Fallback only when the OS config directory cannot be determined.
     let local = local_config_root();
     let _ = ensure_all_assets(&local);
     local
@@ -41,10 +42,10 @@ pub fn resolve_config_path() -> PathBuf {
 
 pub fn ensure_assets_ready() -> Result<PathBuf> {
     if let Some(sys) = system_config_root() {
-        if sys.join("config/default.toml").is_file() {
-            ensure_themes(&sys)?;
-            return Ok(sys);
-        }
+        // Keep behavior consistent with resolve_asset_root(): always ensure assets live here.
+        let _ = migrate_legacy_local_assets(&sys);
+        ensure_all_assets(&sys)?;
+        return Ok(sys);
     }
 
     let local = local_config_root();
@@ -53,24 +54,58 @@ pub fn ensure_assets_ready() -> Result<PathBuf> {
 }
 
 fn system_config_root() -> Option<PathBuf> {
-    // Linux: $HOME/.config/cli-music-player
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var_os("HOME")?;
-        return Some(PathBuf::from(home).join(".config").join("cli-music-player"));
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    // Cross-platform OS config directory.
+    // Linux: $XDG_CONFIG_HOME/cli-music-player (usually ~/.config/cli-music-player)
+    // macOS: ~/Library/Application Support/cli-music-player
+    // Windows: %APPDATA%\cli-music-player
+    BaseDirs::new().map(|d| d.config_dir().join("cli-music-player"))
 }
 
 fn local_config_root() -> PathBuf {
-    // 需求：在当前文件夹目录生成 .config（并包含运行所需文件）
+    // Legacy fallback: in the current working directory.
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".config")
+}
+
+fn migrate_legacy_local_assets(sys_root: &Path) -> Result<()> {
+    // If a legacy local config exists (./.config/...), copy it into the system config
+    // directory only when the system config is missing.
+    let legacy_root = local_config_root();
+    let legacy_cfg = legacy_root.join("config/default.toml");
+    let sys_cfg = sys_root.join("config/default.toml");
+
+    if sys_cfg.is_file() {
+        return Ok(());
+    }
+    if !legacy_cfg.is_file() {
+        return Ok(());
+    }
+
+    // Ensure destination directories exist.
+    ensure_dir(&sys_root.join("config"))?;
+    ensure_dir(&sys_root.join("themes"))?;
+
+    // Copy config.
+    fs::copy(&legacy_cfg, &sys_cfg)
+        .with_context(|| format!("copy {} -> {}", legacy_cfg.display(), sys_cfg.display()))?;
+
+    // Copy themes best-effort.
+    let legacy_themes = legacy_root.join("themes");
+    if legacy_themes.is_dir() {
+        for entry in fs::read_dir(&legacy_themes).with_context(|| format!("read_dir {}", legacy_themes.display()))? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(name) = p.file_name() {
+                    let dst = sys_root.join("themes").join(name);
+                    let _ = fs::copy(&p, &dst);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_all_assets(root: &Path) -> Result<()> {

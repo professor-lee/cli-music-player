@@ -18,6 +18,7 @@
 	<img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
 	<img src="https://img.shields.io/badge/Platform-Linux-informational" alt="Platform">
 	<img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="License">
+	<img src="https://img.shields.io/github/stars/professor-lee/cli-music-player?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
 </p>
 
 <h2 align="center">Project Overview</h2>
@@ -71,8 +72,11 @@ cargo build --release
 ./target/release/cli-music-player
 ```
 
-If you run the binary outside the repo (or package it for distribution), make sure the app can locate the asset directories: `themes/` and `config/`.
-You can set `CLI_MUSIC_PLAYER_ASSET_DIR` to a directory that contains them (typically the repo root).
+On first run, the app will create (if missing) its config + theme files under your OS config directory.
+
+- Linux: `$XDG_CONFIG_HOME/cli-music-player` (usually `~/.config/cli-music-player`)
+
+You can override the root directory with `CLI_MUSIC_PLAYER_ASSET_DIR` (it will still use `config/` and `themes/` under that root).
 
 <h2 align="center">Spectrum Visualization (cava)</h2>
 
@@ -159,8 +163,13 @@ cargo build --release
 
 <h2 align="center">Configuration</h2>
 
-- `config/default.toml`: UI/spectrum/MPRIS settings
-- `themes/*.toml`: theme definitions (Catppuccin)
+- `config/default.toml`: UI/spectrum/MPRIS + EQ settings
+- `themes/*.toml`: theme definitions
+
+Default locations (Linux):
+
+- `~/.config/cli-music-player/config/default.toml`
+- `~/.config/cli-music-player/themes/*.toml`
 
 <h2 align="center">Keyboard Shortcuts</h2>
 
@@ -174,11 +183,20 @@ Open the in-app help at any time with `Ctrl+K`.
 | `Left` / `Right` | Prev / Next |
 | `Up` / `Down` | Volume up / down |
 | `E` | Open the equalizer (local) |
+| `Alt+R` | Reset equalizer to default (in EQ modal) |
 | `M` | Toggle repeat mode (local) |
 | `T` | Open Settings |
 | `Ctrl+K` | Open Keys (help) |
+| `Enter` | Confirm (folder input / playlist) |
 | `Q` | Quit |
 | `Esc` | Close overlays/modals |
+
+When the playlist is open:
+
+| Key | Action |
+|---|---|
+| `Ctrl+Up` / `Ctrl+Down` | Move selected item up / down |
+| `Ctrl+Left` / `Ctrl+Right` | Prev / Next album (MultiAlbum) |
 
 ---
 
