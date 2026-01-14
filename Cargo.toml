@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 log = "0.4"
 env_logger = "0.11"
+libc = "0.2"
 
 ratatui = "0.26"
 crossterm = "0.27"
@@ -29,6 +30,7 @@ lofty = "0.18"
 image = "0.24"
 unicode-width = "0.1"
 directories = "6.0.0"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris = "2.0"

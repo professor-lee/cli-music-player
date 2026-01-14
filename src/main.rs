@@ -11,6 +11,10 @@ use anyhow::Result;
 fn main() -> Result<()> {
     env_logger::init();
 
+    // Filter noisy ALSA(libasound) underrun logs from stderr to avoid corrupting the TUI.
+    // Keeps other stderr output (including env_logger) intact.
+    utils::stderr_filter::install_alsa_stderr_filter();
+
     let config = data::config::Config::load_or_default()?;
     let theme = data::theme_loader::ThemeLoader::load(&config.theme)?;
 

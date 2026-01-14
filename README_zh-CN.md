@@ -37,7 +37,8 @@
 - 本地音频均衡器支持
 - 系统播放监控（MPRIS）
 - 播放列表侧边栏
-- Settings 弹窗（主题切换 + 开关项 + UI FPS 30/60）
+- 专辑封面渲染：默认 ASCII 字符封面；如终端支持可启用 Kitty 图片封面
+- Settings 弹窗（主题、透明背景、专辑边框、UI FPS 30/60、Kitty 开关、封面质量）
 - 歌词显示
 - 频谱可视化（优先使用 `cava` bars；不可用时回退内部 FFT）
 
@@ -165,6 +166,11 @@ cargo build --release
 
 - `config/default.toml`：UI/频谱/MPRIS + 均衡器（EQ）等配置
 - `themes/*.toml`：主题定义
+
+与 Kitty 封面相关的配置项（位于 `config/default.toml`）：
+
+- `kitty_graphics`：启用 Kitty 图形协议渲染（默认：`false`）
+- `kitty_cover_scale_percent`：封面质量百分比（默认：`50`；`100` 表示不下采样）
 
 默认位置（Linux）：
 

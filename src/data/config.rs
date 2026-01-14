@@ -21,6 +21,12 @@ pub struct Config {
 
     #[serde(default = "default_album_border")]
     pub album_border: bool,
+
+    #[serde(default)]
+    pub kitty_graphics: bool,
+
+    #[serde(default = "default_kitty_cover_scale_percent")]
+    pub kitty_cover_scale_percent: u8,
 }
 
 fn default_album_border() -> bool {
@@ -29,6 +35,10 @@ fn default_album_border() -> bool {
 
 fn default_eq_bands_db() -> [f32; crate::app::state::EQ_BANDS] {
     DEFAULT_EQ_BANDS_DB
+}
+
+fn default_kitty_cover_scale_percent() -> u8 {
+    50
 }
 
 impl Default for Config {
@@ -41,6 +51,8 @@ impl Default for Config {
             eq_bands_db: default_eq_bands_db(),
             transparent_background: false,
             album_border: default_album_border(),
+            kitty_graphics: false,
+            kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
         }
     }
 }

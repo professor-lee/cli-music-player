@@ -4,3 +4,5 @@ spectrum_hz = 30
 mpris_poll_ms = 100
 transparent_background = true
 album_border = false
+kitty_graphics = false
+kitty_cover_scale_percent = 50

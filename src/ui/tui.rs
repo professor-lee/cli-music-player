@@ -13,6 +13,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::{self, Stdout};
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
+use std::thread;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UiLayout {
@@ -25,22 +28,74 @@ pub struct UiLayout {
     pub info_volume: Rect,
     pub info_controls: Rect,
 
+    pub info_cover_image: Rect,
+
     pub playlist_rect: Rect,
     pub playlist_inner: Rect,
     pub playlist_list_inner: Rect,
+
+    pub playlist_cover_image: Rect,
+}
+
+struct KittyRenderRequest {
+    hash: u64,
+    bytes: Vec<u8>,
+    max_w: u32,
+    max_h: u32,
+}
+
+struct KittyRenderResponse {
+    hash: u64,
+    b64: String,
 }
 
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     pub should_quit: bool,
+
+    kitty_info_last: Option<(u64, u16, u16)>,
+    kitty_playlist_last: Option<(u64, u16, u16)>,
+
+    kitty_image_ids: HashMap<u64, u32>,
+    kitty_transmitted: HashSet<u64>,
+    kitty_next_image_id: u32,
+
+    kitty_tx: mpsc::Sender<KittyRenderRequest>,
+    kitty_rx: mpsc::Receiver<KittyRenderResponse>,
+    kitty_pending: HashSet<u64>,
+
+    kitty_last_cover_quality: u8,
 }
 
 impl Tui {
     pub fn new() -> Result<Self> {
+        let (tx, rx) = mpsc::channel::<KittyRenderRequest>();
+        let (res_tx, res_rx) = mpsc::channel::<KittyRenderResponse>();
+
+        thread::spawn(move || {
+            while let Ok(req) = rx.recv() {
+                if let Some(b64) = crate::render::kitty_graphics::encode_image_bytes_to_png_base64(&req.bytes, req.max_w, req.max_h) {
+                    let _ = res_tx.send(KittyRenderResponse { hash: req.hash, b64 });
+                }
+            }
+        });
+
         let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal, should_quit: false })
+        Ok(Self {
+            terminal,
+            should_quit: false,
+            kitty_info_last: None,
+            kitty_playlist_last: None,
+            kitty_image_ids: HashMap::new(),
+            kitty_transmitted: HashSet::new(),
+            kitty_next_image_id: 2000,
+            kitty_tx: tx,
+            kitty_rx: res_rx,
+            kitty_pending: HashSet::new(),
+            kitty_last_cover_quality: 0,
+        })
     }
 
     pub fn enter(&mut self) -> Result<()> {
@@ -108,6 +163,13 @@ impl Tui {
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
 
+            // For kitty graphics, we draw into the inner area (optional border).
+            layout_out.info_cover_image = if app.config.album_border {
+                info_l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 })
+            } else {
+                info_l.cover
+            };
+
             // base styling
             f.render_widget(ratatui::widgets::Clear, size);
 
@@ -148,6 +210,7 @@ impl Tui {
                     let pl_layout = playlist_panel::compute_layout(r, app);
                     layout_out.playlist_inner = pl_layout.inner;
                     layout_out.playlist_list_inner = pl_layout.list_inner;
+                    layout_out.playlist_cover_image = pl_layout.cover_rect;
                     playlist_panel::render(f, r, app);
                 }
             }
@@ -204,7 +267,219 @@ impl Tui {
             }
         })?;
 
+        // After ratatui draw, optionally paint kitty images on top.
+        // (Keep it best-effort; if the terminal doesn't support it, users can keep it off.)
+        self.paint_kitty_images(app, &layout_out)?;
+
         Ok(layout_out)
+    }
+
+    fn image_id_for_hash(&mut self, hash: u64) -> u32 {
+        if let Some(id) = self.kitty_image_ids.get(&hash).copied() {
+            return id;
+        }
+        let id = self.kitty_next_image_id;
+        self.kitty_next_image_id = self.kitty_next_image_id.saturating_add(1);
+        self.kitty_image_ids.insert(hash, id);
+        id
+    }
+
+    fn paint_kitty_images(&mut self, app: &mut AppState, layout: &UiLayout) -> Result<()> {
+        const INFO_PLACEMENT_ID: u32 = 1;
+        const PLAYLIST_PLACEMENT_ID: u32 = 2;
+
+        // While Settings modal is open, do NOT refresh/re-transmit covers; keep using
+        // the last applied quality so the cover doesn't constantly churn while tweaking.
+        let settings_open = app.overlay == Overlay::SettingsModal;
+
+        // 0 is used as an internal sentinel for "not initialized yet".
+        if self.kitty_last_cover_quality == 0 {
+            self.kitty_last_cover_quality = app.config.kitty_cover_scale_percent;
+        }
+
+        // Approximate terminal cell pixel size. Used only for downscaling before encoding.
+        const CELL_W_PX: u32 = 8;
+        const CELL_H_PX: u32 = 16;
+
+        let hide_info = |this: &mut Self| {
+            if let Some((hash, _, _)) = this.kitty_info_last {
+                if let Some(&image_id) = this.kitty_image_ids.get(&hash) {
+                    let _ = crate::render::kitty_graphics::delete_image_placement(image_id, INFO_PLACEMENT_ID, false);
+                } else {
+                    let _ = crate::render::kitty_graphics::delete_placement(INFO_PLACEMENT_ID);
+                }
+                this.kitty_info_last = None;
+            }
+        };
+        let hide_playlist = |this: &mut Self| {
+            if let Some((hash, _, _)) = this.kitty_playlist_last {
+                if let Some(&image_id) = this.kitty_image_ids.get(&hash) {
+                    let _ = crate::render::kitty_graphics::delete_image_placement(image_id, PLAYLIST_PLACEMENT_ID, false);
+                } else {
+                    let _ = crate::render::kitty_graphics::delete_placement(PLAYLIST_PLACEMENT_ID);
+                }
+                this.kitty_playlist_last = None;
+            }
+        };
+
+        // Always drain responses so the channel doesn't grow. If kitty is disabled,
+        // we intentionally discard the encoded data and clear pending flags.
+        let drain_discard = |this: &mut Self| {
+            while let Ok(res) = this.kitty_rx.try_recv() {
+                this.kitty_pending.remove(&res.hash);
+            }
+        };
+
+        if !app.kitty_graphics_supported || !app.config.kitty_graphics {
+            // Kitty graphics disabled (or unsupported): hide any placed images and free
+            // image data so the terminal doesn't keep stale cached images.
+            drain_discard(self);
+            hide_info(self);
+            hide_playlist(self);
+            for &image_id in self.kitty_image_ids.values() {
+                let _ = crate::render::kitty_graphics::delete_image(image_id, true);
+            }
+            self.kitty_image_ids.clear();
+            self.kitty_transmitted.clear();
+            self.kitty_pending.clear();
+            self.kitty_next_image_id = 2000;
+            return Ok(());
+        }
+
+        // If quality changed, re-transmit images at the new quality.
+        // Only trigger this refresh when the Settings modal is closed.
+        if !settings_open && self.kitty_last_cover_quality != app.config.kitty_cover_scale_percent {
+            self.kitty_last_cover_quality = app.config.kitty_cover_scale_percent;
+
+            // Drain any completed encodes; we'll re-enqueue below.
+            while let Ok(res) = self.kitty_rx.try_recv() {
+                self.kitty_pending.remove(&res.hash);
+            }
+
+            hide_info(self);
+            hide_playlist(self);
+            for &image_id in self.kitty_image_ids.values() {
+                let _ = crate::render::kitty_graphics::delete_image(image_id, true);
+            }
+            self.kitty_image_ids.clear();
+            self.kitty_transmitted.clear();
+            self.kitty_pending.clear();
+            self.kitty_next_image_id = 2000;
+        }
+
+        let effective_quality: u8 = if settings_open {
+            self.kitty_last_cover_quality
+        } else {
+            app.config.kitty_cover_scale_percent
+        };
+
+        let target_px = |w_cells: u16, h_cells: u16| -> (u32, u32) {
+            let q = effective_quality.clamp(25, 100);
+            // 100% means no downscale "compression" at all.
+            if q >= 100 {
+                return (u32::MAX, u32::MAX);
+            }
+
+            let scale = (q as u32).max(1);
+            let w = (w_cells as u32)
+                .saturating_mul(CELL_W_PX)
+                .saturating_mul(scale)
+                / 100;
+            let h = (h_cells as u32)
+                .saturating_mul(CELL_H_PX)
+                .saturating_mul(scale)
+                / 100;
+            let w = w.clamp(64, 1024);
+            let h = h.clamp(64, 1024);
+            (w, h)
+        };
+
+        // Drain finished render results and transmit (only when kitty is enabled).
+        while let Ok(res) = self.kitty_rx.try_recv() {
+            let image_id = self.image_id_for_hash(res.hash);
+            let _ = crate::render::kitty_graphics::transmit_png_base64(image_id, &res.b64);
+            self.kitty_transmitted.insert(res.hash);
+            self.kitty_pending.remove(&res.hash);
+        }
+
+        let enqueue = |this: &mut Self, hash: u64, bytes: &[u8], rect: Rect| {
+            if rect.width == 0 || rect.height == 0 {
+                return;
+            }
+            if this.kitty_transmitted.contains(&hash) || this.kitty_pending.contains(&hash) {
+                return;
+            }
+            let (max_w, max_h) = target_px(rect.width, rect.height);
+            let _ = this.kitty_tx.send(KittyRenderRequest {
+                hash,
+                bytes: bytes.to_vec(),
+                max_w,
+                max_h,
+            });
+            this.kitty_pending.insert(hash);
+        };
+
+        // If playlist overlay is visible (including slide animation), hide the song cover
+        // to avoid the kitty image overlapping the playlist UI.
+        let playlist_overlay_visible = app.overlay == Overlay::Playlist
+            || app.playlist_slide_x != app.playlist_slide_target_x
+            || layout.playlist_rect.width > 0;
+
+        // Only show the playlist cover once fully expanded.
+        let playlist_fully_expanded = app.overlay == Overlay::Playlist
+            && app.playlist_slide_x == 0
+            && app.playlist_slide_target_x == 0;
+
+        // Info panel cover (current track).
+        if let (Some(bytes), Some(hash)) = (app.player.track.cover.as_deref(), app.player.track.cover_hash) {
+            enqueue(self, hash, bytes, layout.info_cover_image);
+        }
+
+        if playlist_overlay_visible {
+            hide_info(self);
+        } else if let (Some(_bytes), Some(hash)) = (app.player.track.cover.as_deref(), app.player.track.cover_hash) {
+            let sig = (hash, layout.info_cover_image.width, layout.info_cover_image.height);
+            if self.kitty_info_last != Some(sig) {
+                // When the image id changes (hash changes), kitty treats (image_id, placement_id)
+                // as the unique placement key. Reusing the same placement_id with a new image_id
+                // would leave the old placement behind unless we explicitly delete it.
+                hide_info(self);
+                if self.kitty_transmitted.contains(&hash) {
+                    let image_id = self.image_id_for_hash(hash);
+                    let _ = crate::render::kitty_graphics::place_image(layout.info_cover_image, image_id, INFO_PLACEMENT_ID);
+                    self.kitty_info_last = Some(sig);
+                }
+            }
+        } else if self.kitty_info_last.is_some() {
+            hide_info(self);
+        }
+
+        // Playlist album cover (local browsing). Only show the real cover once fully expanded.
+        if playlist_fully_expanded {
+            if let (Some(bytes), Some(hash)) = (app.local_view_album_cover.as_deref(), app.local_view_album_cover_hash) {
+                enqueue(self, hash, bytes, layout.playlist_cover_image);
+            }
+        }
+
+        if !playlist_fully_expanded || layout.playlist_cover_image.width <= 1 || layout.playlist_cover_image.height <= 1 {
+            hide_playlist(self);
+        } else if let (Some(_bytes), Some(hash)) = (app.local_view_album_cover.as_deref(), app.local_view_album_cover_hash) {
+            let sig = (hash, layout.playlist_cover_image.width, layout.playlist_cover_image.height);
+            if self.kitty_playlist_last != Some(sig) {
+                // Same reasoning as info cover: avoid accumulating multiple placements
+                // for different image ids in the same visual slot.
+                hide_playlist(self);
+                if self.kitty_transmitted.contains(&hash) {
+                    let image_id = self.image_id_for_hash(hash);
+                    let _ = crate::render::kitty_graphics::place_image(layout.playlist_cover_image, image_id, PLAYLIST_PLACEMENT_ID);
+                    self.kitty_playlist_last = Some(sig);
+                }
+            }
+        } else if self.kitty_playlist_last.is_some() {
+            hide_playlist(self);
+        }
+
+        Ok(())
     }
 }
 
@@ -220,7 +495,8 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    let area = centered_rect(size, 44, 10);
+    // Keep enough height to show header + all items (now 6 settings).
+    let area = centered_rect(size, 44, 12);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -239,6 +515,20 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
     ));
     lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
 
+    let kitty_label = if !app.kitty_graphics_supported {
+        "Kitty graphics: Unsupported".to_string()
+    } else {
+        format!("Kitty graphics: {}", if app.config.kitty_graphics { "On" } else { "Off" })
+    };
+
+    let cover_compress_label = if !app.kitty_graphics_supported {
+        format!("Cover quality: {}% (unsupported)", app.config.kitty_cover_scale_percent)
+    } else if !app.config.kitty_graphics {
+        format!("Cover quality: {}% (kitty off)", app.config.kitty_cover_scale_percent)
+    } else {
+        format!("Cover quality: {}%", app.config.kitty_cover_scale_percent)
+    };
+
     let items = [
         format!("Theme: {}", app.theme.name.as_label()),
         format!(
@@ -247,18 +537,30 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         ),
         format!("Album border: {}", if app.config.album_border { "On" } else { "Off" }),
         format!("UI FPS: {}", if app.config.ui_fps >= 60 { 60 } else { 30 }),
+        kitty_label,
+        cover_compress_label,
     ];
 
     for (idx, text) in items.iter().enumerate() {
+        let disabled = match idx {
+            4 => !app.kitty_graphics_supported,
+            5 => !app.kitty_graphics_supported || !app.config.kitty_graphics,
+            _ => false,
+        };
+
         let style = if idx == app.settings_selected {
-            Style::default()
-                .fg(app.theme.color_base())
-                .bg(app.theme.color_accent())
-                .add_modifier(Modifier::BOLD)
+            if disabled {
+                Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())
+            } else {
+                Style::default()
+                    .fg(app.theme.color_base())
+                    .bg(app.theme.color_accent())
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if disabled {
+            Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())
         } else {
-            Style::default()
-                .fg(app.theme.color_text())
-                .bg(app.theme.color_surface())
+            Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())
         };
         lines.push(Line::styled(format!("  {}", text), style));
     }

@@ -1,10 +1,10 @@
-use crate::app::state::{AppState, CoverSnapshot, PlayMode};
+use crate::app::state::{AppState, CoverSnapshot, Overlay, PlayMode};
 use crate::render::cover_cache::CoverKey;
 use crate::ui::components::{control_buttons, progress_bar, volume_bar};
 use crate::ui::borders::SOLID_BORDER;
 use crate::utils::timefmt;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame};
@@ -94,46 +94,122 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     if l.cover.width > 0 && l.cover.height > 0 {
         let show_border = app.config.album_border;
 
-        if let Some(anim) = app.cover_anim.take() {
-            let p = (app
-                .last_frame
-                .duration_since(anim.started_at)
-                .as_secs_f32()
-                / anim.duration.as_secs_f32())
-            .clamp(0.0, 1.0);
-            let offset = (p * l.cover.width as f32).round() as i16;
+        let kitty_enabled = app.config.kitty_graphics
+            && app.kitty_graphics_supported
+            && app.player.track.cover.is_some();
 
-            let (from_box, from_fg) = cover_box_ascii_for_snapshot(
-                &anim.from,
-                l.cover.width,
-                l.cover.height,
-                show_border,
-                app,
-            );
-            let (to_box, to_fg) = cover_box_ascii_for_snapshot(
-                &anim.to,
-                l.cover.width,
-                l.cover.height,
-                show_border,
-                app,
-            );
-
-            let composed = compose_slide_cover(l.cover.width, l.cover.height, &from_box, &to_box, anim.dir, offset);
-            let fg = if to_fg == app.theme.color_text() { to_fg } else { from_fg };
-            f.render_widget(Paragraph::new(composed).style(Style::default().fg(fg)), l.cover);
-
-            // restore animation (lifetime managed in tick)
-            app.cover_anim = Some(anim);
+        let dominant_bg = if let (Some(bytes), Some(hash)) = (app.player.track.cover.as_deref(), app.player.track.cover_hash) {
+            app.cover_dominant_rgb(hash, bytes)
+                .map(|(r, g, b)| Color::Rgb(r, g, b))
+                .unwrap_or(app.theme.color_surface())
         } else {
-            let snap = CoverSnapshot::from(&app.player.track);
-            let (box_ascii, fg) = cover_box_ascii_for_snapshot(
-                &snap,
-                l.cover.width,
-                l.cover.height,
-                show_border,
-                app,
-            );
-            f.render_widget(Paragraph::new(box_ascii).style(Style::default().fg(fg)), l.cover);
+            app.theme.color_surface()
+        };
+
+        // Playlist overlay (including slide animation) should hide the song cover only in
+        // kitty mode (otherwise the overlay will naturally cover the ASCII render).
+        let playlist_overlay_visible = app.overlay == Overlay::Playlist
+            || app.playlist_slide_x != app.playlist_slide_target_x;
+
+        if kitty_enabled {
+            if playlist_overlay_visible {
+                // Pure color placeholder (keep border option).
+                let bg = dominant_bg;
+                if show_border {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(SOLID_BORDER)
+                        .style(Style::default().fg(app.theme.color_subtext()));
+                    f.render_widget(block, l.cover);
+                    let inner = l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                    if inner.width > 0 && inner.height > 0 {
+                        f.render_widget(Block::default().style(Style::default().bg(bg)), inner);
+                    }
+                } else {
+                    f.render_widget(Block::default().style(Style::default().bg(bg)), l.cover);
+                }
+
+                // Pre-warm the ASCII cover cache while hidden so closing playlist is instant.
+                let snap = CoverSnapshot::from(&app.player.track);
+                let (inner_w, inner_h) = if l.cover.width >= 3 && l.cover.height >= 3 {
+                    (l.cover.width.saturating_sub(2), l.cover.height.saturating_sub(2))
+                } else {
+                    (l.cover.width, l.cover.height)
+                };
+                let _ = cover_ascii_for_snapshot(&snap, inner_w, inner_h, app);
+            } else {
+                // Draw border (optional) and keep the inside blank; the real image is painted
+                // after ratatui draw via kitty graphics protocol.
+                if show_border {
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(SOLID_BORDER)
+                        .style(Style::default().fg(app.theme.color_subtext()));
+                    f.render_widget(block, l.cover);
+                    let inner = l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                    if inner.width > 0 && inner.height > 0 {
+                        f.render_widget(Paragraph::new(" ").style(Style::default().bg(dominant_bg)), inner);
+                    }
+                } else {
+                    f.render_widget(Paragraph::new(" ").style(Style::default().bg(dominant_bg)), l.cover);
+                }
+
+                // Hot-switch support: while kitty is on, pre-warm the ASCII cover in the background
+                // (or load it from .order.toml) so turning kitty off in Settings is instant.
+                let snap = CoverSnapshot::from(&app.player.track);
+                let (inner_w, inner_h) = if l.cover.width >= 3 && l.cover.height >= 3 {
+                    (l.cover.width.saturating_sub(2), l.cover.height.saturating_sub(2))
+                } else {
+                    (l.cover.width, l.cover.height)
+                };
+                let _ = cover_ascii_for_snapshot(&snap, inner_w, inner_h, app);
+            }
+
+        } else {
+            // ASCII mode: do not actively hide the song cover when playlist opens.
+            // The playlist overlay is rendered later and naturally covers it.
+            if let Some(anim) = app.cover_anim.take() {
+                let p = (app
+                    .last_frame
+                    .duration_since(anim.started_at)
+                    .as_secs_f32()
+                    / anim.duration.as_secs_f32())
+                .clamp(0.0, 1.0);
+                let offset = (p * l.cover.width as f32).round() as i16;
+
+                let (from_box, from_fg) = cover_box_ascii_for_snapshot(
+                    &anim.from,
+                    l.cover.width,
+                    l.cover.height,
+                    show_border,
+                    app,
+                );
+                let (to_box, to_fg) = cover_box_ascii_for_snapshot(
+                    &anim.to,
+                    l.cover.width,
+                    l.cover.height,
+                    show_border,
+                    app,
+                );
+
+                let composed = compose_slide_cover(l.cover.width, l.cover.height, &from_box, &to_box, anim.dir, offset);
+                let fg = if to_fg == app.theme.color_text() { to_fg } else { from_fg };
+                f.render_widget(Paragraph::new(composed).style(Style::default().fg(fg)), l.cover);
+
+                // restore animation (lifetime managed in tick)
+                app.cover_anim = Some(anim);
+            } else {
+                let snap = CoverSnapshot::from(&app.player.track);
+                let (box_ascii, fg) = cover_box_ascii_for_snapshot(
+                    &snap,
+                    l.cover.width,
+                    l.cover.height,
+                    show_border,
+                    app,
+                );
+                f.render_widget(Paragraph::new(box_ascii).style(Style::default().fg(fg)), l.cover);
+            }
+
         }
     }
 
@@ -285,9 +361,15 @@ fn cover_ascii_for_snapshot(
         let ascii = match cached {
             Some(s) => s,
             None => {
+                if let Some(folder) = snap.cover_folder.as_deref() {
+                    if let Some(s) = crate::playback::local_player::read_cover_ascii_cache(folder, hash, width, height) {
+                        app.cover_cache.borrow_mut().put(key, s.clone());
+                        return (s, app.theme.color_text());
+                    }
+                }
                 // Avoid heavy render on UI thread; enqueue background render and
                 // return a cheap placeholder for this frame.
-                app.queue_cover_ascii_render(key, bytes, '░');
+                app.queue_cover_ascii_render(key, bytes, '░', snap.cover_folder.clone());
                 fill_ascii(width, height, '░')
             }
         };

@@ -5,7 +5,7 @@ use crate::render::cover_cache::CoverKey;
 use crate::render::cover_renderer::render_cover_ascii;
 use crate::ui::theme::Theme;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -92,6 +92,7 @@ pub struct TrackMetadata {
     pub duration: Duration,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
+    pub cover_folder: Option<PathBuf>,
     pub lyrics: Option<Vec<LyricLine>>,
 }
 
@@ -102,6 +103,7 @@ pub struct CoverSnapshot {
     pub album: String,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
+    pub cover_folder: Option<PathBuf>,
 }
 
 impl From<&TrackMetadata> for CoverSnapshot {
@@ -112,6 +114,7 @@ impl From<&TrackMetadata> for CoverSnapshot {
             album: t.album.clone(),
             cover: t.cover.clone(),
             cover_hash: t.cover_hash,
+            cover_folder: t.cover_folder.clone(),
         }
     }
 }
@@ -130,8 +133,10 @@ pub struct CoverAnim {
 pub struct PlaylistAlbumAnim {
     pub from_cover: Option<Vec<u8>>,
     pub from_hash: Option<u64>,
+    pub from_folder: Option<PathBuf>,
     pub to_cover: Option<Vec<u8>>,
     pub to_hash: Option<u64>,
+    pub to_folder: Option<PathBuf>,
     // -1 => slide left (next), +1 => slide right (prev)
     pub dir: i8,
     pub started_at: Instant,
@@ -147,6 +152,7 @@ impl Default for TrackMetadata {
             duration: Duration::from_secs(0),
             cover: None,
             cover_hash: None,
+            cover_folder: None,
             lyrics: None,
         }
     }
@@ -225,6 +231,8 @@ pub struct AppState {
     pub config: Config,
     pub theme: Theme,
 
+    pub kitty_graphics_supported: bool,
+
     pub player: PlayerState,
     pub playlist: Playlist,
 
@@ -234,10 +242,11 @@ pub struct AppState {
     pub spectrum: SpectrumData,
 
     pub cover_cache: RefCell<CoverCache>,
+    pub cover_dominant_rgb_cache: RefCell<HashMap<u64, (u8, u8, u8)>>,
 
     cover_render_tx: Sender<CoverRenderRequest>,
     cover_render_rx: Receiver<CoverRenderResult>,
-    cover_render_inflight: HashSet<CoverKey>,
+    cover_render_inflight: RefCell<HashSet<CoverKey>>,
 
     pub overlay: Overlay,
     pub folder_input: FolderInput,
@@ -286,6 +295,7 @@ struct CoverRenderRequest {
     key: CoverKey,
     bytes: Vec<u8>,
     placeholder: char,
+    persist_folder: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -313,6 +323,16 @@ impl AppState {
             while let Ok(req) = cover_render_req_rx.recv() {
                 let ascii = render_cover_ascii(&req.bytes, req.key.width, req.key.height)
                     .unwrap_or_else(|| fill_ascii(req.key.width, req.key.height, req.placeholder));
+
+                if let Some(folder) = req.persist_folder.as_deref() {
+                    let _ = crate::playback::local_player::write_cover_ascii_cache(
+                        folder,
+                        req.key.hash,
+                        req.key.width,
+                        req.key.height,
+                        &ascii,
+                    );
+                }
                 let _ = cover_render_res_tx.send(CoverRenderResult { key: req.key, ascii });
             }
         });
@@ -320,14 +340,16 @@ impl AppState {
         Self {
             config,
             theme,
+            kitty_graphics_supported: crate::utils::kitty::kitty_graphics_supported(),
             player: PlayerState::default(),
             playlist: Playlist::default(),
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
+            cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
             cover_render_rx,
-            cover_render_inflight: HashSet::new(),
+            cover_render_inflight: RefCell::new(HashSet::new()),
             overlay: Overlay::None,
             folder_input: FolderInput::default(),
             settings_selected: 0,
@@ -356,22 +378,38 @@ impl AppState {
         }
     }
 
+    pub fn cover_dominant_rgb(&self, hash: u64, bytes: &[u8]) -> Option<(u8, u8, u8)> {
+        if let Some(rgb) = self.cover_dominant_rgb_cache.borrow().get(&hash).copied() {
+            return Some(rgb);
+        }
+        let rgb = crate::render::dominant_color::dominant_rgb_from_image_bytes(bytes)?;
+        self.cover_dominant_rgb_cache.borrow_mut().insert(hash, rgb);
+        Some(rgb)
+    }
+
     pub fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now()));
     }
 
-    pub fn queue_cover_ascii_render(&mut self, key: CoverKey, bytes: &[u8], placeholder: char) {
+    pub fn queue_cover_ascii_render(
+        &self,
+        key: CoverKey,
+        bytes: &[u8],
+        placeholder: char,
+        persist_folder: Option<PathBuf>,
+    ) {
         if self.cover_cache.borrow().contains(key) {
             return;
         }
-        if self.cover_render_inflight.contains(&key) {
+        if self.cover_render_inflight.borrow().contains(&key) {
             return;
         }
-        self.cover_render_inflight.insert(key);
+        self.cover_render_inflight.borrow_mut().insert(key);
         let _ = self.cover_render_tx.send(CoverRenderRequest {
             key,
             bytes: bytes.to_vec(),
             placeholder,
+            persist_folder,
         });
     }
 
@@ -381,7 +419,7 @@ impl AppState {
         loop {
             match self.cover_render_rx.try_recv() {
                 Ok(msg) => {
-                    self.cover_render_inflight.remove(&msg.key);
+                    self.cover_render_inflight.borrow_mut().remove(&msg.key);
                     self.cover_cache.borrow_mut().put(msg.key, msg.ascii);
                 }
                 Err(TryRecvError::Empty) => break,

@@ -31,14 +31,17 @@ pub fn read_metadata(path: &Path) -> Result<TrackMetadata> {
         if let Some((bytes, hash)) = read_embedded_cover(&tagged) {
             meta.cover_hash = Some(hash);
             meta.cover = Some(bytes);
+            meta.cover_folder = path.parent().map(|p| p.to_path_buf());
         }
     }
 
     // Fallback: local folder cover image near the audio file.
     if meta.cover.is_none() {
-        if let Some((bytes, hash)) = read_cover_from_folder(path.parent().unwrap_or(Path::new("."))) {
+        let folder = path.parent().unwrap_or(Path::new("."));
+        if let Some((bytes, hash)) = read_cover_from_folder(folder) {
             meta.cover_hash = Some(hash);
             meta.cover = Some(bytes);
+            meta.cover_folder = Some(folder.to_path_buf());
         }
     }
 

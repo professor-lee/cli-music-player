@@ -438,6 +438,12 @@ fn handle_action(
                             app.config.album_border = !app.config.album_border;
                             let _ = app.config.save();
                         }
+                        4 => {
+                            if app.kitty_graphics_supported {
+                                app.config.kitty_graphics = !app.config.kitty_graphics;
+                                let _ = app.config.save();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -509,6 +515,7 @@ fn handle_action(
                 if idx != app.local_view_album_index {
                     let from_cover = app.local_view_album_cover.clone();
                     let from_hash = app.local_view_album_cover_hash;
+                        let from_folder = app.local_view_album_folder.clone();
 
                     app.local_view_album_index = idx;
                     let folder = app.local_album_folders[idx].clone();
@@ -528,8 +535,10 @@ fn handle_action(
                         app.playlist_album_anim = Some(crate::app::state::PlaylistAlbumAnim {
                             from_cover,
                             from_hash,
+                            from_folder,
                             to_cover: app.local_view_album_cover.clone(),
                             to_hash: app.local_view_album_cover_hash,
+                            to_folder: app.local_view_album_folder.clone(),
                             dir,
                             started_at: Instant::now(),
                             duration: Duration::from_millis(220),
@@ -545,7 +554,7 @@ fn handle_action(
         }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 4;
+                let count = 6;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
@@ -566,7 +575,7 @@ fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 4;
+                let count = 6;
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
@@ -869,6 +878,30 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
                 app.config.ui_fps = if app.config.ui_fps >= 60 { 30 } else { 60 };
                 let _ = app.config.save();
             }
+        }
+        // Kitty graphics
+        4 => {
+            if delta != 0 && app.kitty_graphics_supported {
+                app.config.kitty_graphics = !app.config.kitty_graphics;
+                let _ = app.config.save();
+            }
+        }
+        // Cover image compression/scale (kitty-only)
+        5 => {
+            if delta == 0 {
+                return;
+            }
+            if !app.kitty_graphics_supported || !app.config.kitty_graphics {
+                return;
+            }
+
+            // Interpret as a scale percent (lower => more compression/faster).
+            // Keep it simple and stable: 25..=100 in steps of 5.
+            let step: i32 = 5;
+            let mut v = app.config.kitty_cover_scale_percent as i32;
+            v = (v + delta * step).clamp(25, 100);
+            app.config.kitty_cover_scale_percent = v as u8;
+            let _ = app.config.save();
         }
         _ => {}
     }

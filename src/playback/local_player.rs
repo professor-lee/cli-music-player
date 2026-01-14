@@ -58,6 +58,54 @@ struct OrderFile {
 
     #[serde(default)]
     last_album: Option<String>,
+
+    // Cached rendered cover ASCII, keyed by "<hash>:<width>x<height>".
+    // Stored here to speed up subsequent loads without re-decoding/resizing images.
+    #[serde(default)]
+    cover: HashMap<String, String>,
+}
+
+fn cover_key(hash: u64, width: u16, height: u16) -> String {
+    format!("{hash}:{width}x{height}")
+}
+
+pub fn read_cover_ascii_cache(folder: &Path, hash: u64, width: u16, height: u16) -> Option<String> {
+    let p = folder.join(".order.toml");
+    if !p.exists() {
+        return None;
+    }
+    let of = read_order_file(folder)?;
+    of.cover.get(&cover_key(hash, width, height)).cloned()
+}
+
+pub fn write_cover_ascii_cache(
+    folder: &Path,
+    hash: u64,
+    width: u16,
+    height: u16,
+    ascii: &str,
+) -> Result<bool> {
+    // If the file exists but is unreadable/unparseable, avoid clobbering it.
+    let p = folder.join(".order.toml");
+    let mut of = if p.exists() {
+        match read_order_file(folder) {
+            Some(v) => v,
+            None => return Ok(false),
+        }
+    } else {
+        OrderFile::default()
+    };
+
+    let k = cover_key(hash, width, height);
+    if let Some(existing) = of.cover.get(&k) {
+        if existing == ascii {
+            return Ok(false);
+        }
+    }
+
+    of.cover.insert(k, ascii.to_string());
+    write_order_file_struct(folder, &of)?;
+    Ok(true)
 }
 
 fn order_key(folder: &Path, path: &Path) -> String {

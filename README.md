@@ -37,7 +37,8 @@ It supports local playback and system monitoring, and includes spectrum visualiz
 - Local Audio Equalizer Support
 - System playback monitoring (MPRIS)
 - Playlist panel
-- Settings modal (theme switch + toggles + UI FPS 30/60)
+- Album cover rendering: ASCII art (default) or Kitty graphics (optional, if supported)
+- Settings modal (theme, transparent background, album border, UI FPS 30/60, Kitty graphics toggle, cover quality)
 - Lyrics display
 - Spectrum visualization (prefers `cava` bars when available; falls back to internal FFT)
 
@@ -165,6 +166,11 @@ cargo build --release
 
 - `config/default.toml`: UI/spectrum/MPRIS + EQ settings
 - `themes/*.toml`: theme definitions
+
+Kitty-related settings (in `config/default.toml`):
+
+- `kitty_graphics`: enable Kitty graphics protocol rendering (default: `false`)
+- `kitty_cover_scale_percent`: cover quality in percent (default: `50`; `100` means no downscale)
 
 Default locations (Linux):
 
