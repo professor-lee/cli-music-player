@@ -1,5 +1,6 @@
 use crate::app::state::AppState;
-use crate::render::spectrum_renderer;
+use crate::data::config::VisualizeMode;
+use crate::render::{oscilloscope_renderer, spectrum_renderer};
 use crate::ui::borders::SOLID_BORDER;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
@@ -50,7 +51,10 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &AppSta
     }
 
     // spectrum (no border here; outer border already drawn)
-    spectrum_renderer::render(f, spectrum_inner, app);
+    match app.config.visualize {
+        VisualizeMode::Bars => spectrum_renderer::render(f, spectrum_inner, app),
+        VisualizeMode::Oscilloscope => oscilloscope_renderer::render(f, spectrum_inner, app),
+    }
 }
 
 

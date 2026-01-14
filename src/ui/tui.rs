@@ -529,6 +529,14 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         format!("Cover quality: {}%", app.config.kitty_cover_scale_percent)
     };
 
+    let visualize_label = format!(
+        "Visualize: {}",
+        match app.config.visualize {
+            crate::data::config::VisualizeMode::Bars => "Bars",
+            crate::data::config::VisualizeMode::Oscilloscope => "Oscilloscope",
+        }
+    );
+
     let items = [
         format!("Theme: {}", app.theme.name.as_label()),
         format!(
@@ -537,14 +545,15 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         ),
         format!("Album border: {}", if app.config.album_border { "On" } else { "Off" }),
         format!("UI FPS: {}", if app.config.ui_fps >= 60 { 60 } else { 30 }),
+        visualize_label,
         kitty_label,
         cover_compress_label,
     ];
 
     for (idx, text) in items.iter().enumerate() {
         let disabled = match idx {
-            4 => !app.kitty_graphics_supported,
-            5 => !app.kitty_graphics_supported || !app.config.kitty_graphics,
+            5 => !app.kitty_graphics_supported,
+            6 => !app.kitty_graphics_supported || !app.config.kitty_graphics,
             _ => false,
         };
 

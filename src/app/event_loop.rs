@@ -4,6 +4,7 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::cava::CavaRunner;
 use crate::audio::spectrum::SpectrumProcessor;
 use crate::data::theme_loader::ThemeLoader;
+use crate::data::config::VisualizeMode;
 use crate::ui::tui::{Tui, UiLayout};
 use crate::ui::theme::ThemeName;
 use crate::utils::input::{map_key, map_mouse, Action};
@@ -123,25 +124,36 @@ pub fn run(app: &mut AppState) -> Result<()> {
         {
             last_spectrum = frame_start;
 
-            if let Some(c) = cava.as_ref() {
-                app.spectrum.bars = c.latest_bars();
-            } else {
-                if app.player.mode == PlayMode::SystemMonitor && app.player.playback == PlaybackState::Playing {
-                    audio_capture.maybe_restart_for_system_playback(frame_start);
+            match app.config.visualize {
+                VisualizeMode::Bars => {
+                    if let Some(c) = cava.as_ref() {
+                        let (l, r) = c.latest_stereo_bars();
+                        app.spectrum.stereo_left = l;
+                        app.spectrum.stereo_right = r;
+                        app.spectrum.bars = c.latest_bars();
+                        app.spectrum.samples.clear();
+                    } else {
+                        update_spectrum_from_samples(app, &mut spectrum, &mut mode_manager, &mut audio_capture, frame_start);
+                    }
                 }
+                VisualizeMode::Oscilloscope => {
+                    if let Some(c) = cava.as_ref() {
+                        let (l, r) = c.latest_stereo_bars();
+                        app.spectrum.stereo_left = l;
+                        app.spectrum.stereo_right = r;
+                        app.spectrum.bars = c.latest_bars();
+                        app.spectrum.samples.clear();
+                    } else {
+                        update_spectrum_from_samples(app, &mut spectrum, &mut mode_manager, &mut audio_capture, frame_start);
+                        // Best-effort fallback when cava isn't available.
+                        app.spectrum.stereo_left = app.spectrum.bars;
+                        app.spectrum.stereo_right = app.spectrum.bars;
+                    }
 
-                let samples = if app.player.mode == PlayMode::LocalPlayback {
-                    mode_manager.local.latest_samples(app.spectrum.fft_size)
-                } else {
-                    audio_capture.latest_samples(app.spectrum.fft_size)
-                };
-
-                let bars = if samples.len() >= app.spectrum.fft_size / 4 {
-                    spectrum.process(samples)
-                } else {
-                    fallback_bars(app.player.volume, app.player.playback)
-                };
-                app.spectrum.bars = bars;
+                    let dt = 1.0 / app.config.spectrum_hz.max(1) as f32;
+                    crate::render::oscilloscope_renderer::advance_phases(&mut app.spectrum.osc_phase_left, dt);
+                    crate::render::oscilloscope_renderer::advance_phases(&mut app.spectrum.osc_phase_right, dt);
+                }
             }
         }
 
@@ -195,6 +207,34 @@ pub fn run(app: &mut AppState) -> Result<()> {
 fn fps_to_dt(fps: u32) -> Duration {
     let fps = fps.clamp(30, 60);
     Duration::from_millis((1000 / fps) as u64)
+}
+
+fn update_spectrum_from_samples(
+    app: &mut AppState,
+    spectrum: &mut SpectrumProcessor,
+    mode_manager: &mut ModeManager,
+    audio_capture: &mut AudioCapture,
+    now: Instant,
+) {
+    if app.player.mode == PlayMode::SystemMonitor && app.player.playback == PlaybackState::Playing {
+        audio_capture.maybe_restart_for_system_playback(now);
+    }
+
+    let samples = if app.player.mode == PlayMode::LocalPlayback {
+        mode_manager.local.latest_samples(app.spectrum.fft_size)
+    } else {
+        audio_capture.latest_samples(app.spectrum.fft_size)
+    };
+
+    // Store samples for visualization (best-effort fallback when cava is unavailable).
+    app.spectrum.samples = samples;
+
+    let bars = if app.spectrum.samples.len() >= app.spectrum.fft_size / 4 {
+        spectrum.process(&app.spectrum.samples)
+    } else {
+        fallback_bars(app.player.volume, app.player.playback)
+    };
+    app.spectrum.bars = bars;
 }
 
 fn handle_local_track_finished(app: &mut AppState, mode_manager: &mut ModeManager) {
@@ -439,6 +479,14 @@ fn handle_action(
                             let _ = app.config.save();
                         }
                         4 => {
+                            // Visualize mode toggle
+                            app.config.visualize = match app.config.visualize {
+                                crate::data::config::VisualizeMode::Bars => crate::data::config::VisualizeMode::Oscilloscope,
+                                crate::data::config::VisualizeMode::Oscilloscope => crate::data::config::VisualizeMode::Bars,
+                            };
+                            let _ = app.config.save();
+                        }
+                        5 => {
                             if app.kitty_graphics_supported {
                                 app.config.kitty_graphics = !app.config.kitty_graphics;
                                 let _ = app.config.save();
@@ -554,7 +602,7 @@ fn handle_action(
         }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 6;
+                let count = 7;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
@@ -575,7 +623,7 @@ fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 6;
+                let count = 7;
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
@@ -769,7 +817,7 @@ fn handle_action(
             PlayMode::Idle => {}
         },
         Action::ToggleRepeatMode => {
-            // 需求：循环模式仅对本地音频有效；系统(MPRIS)来源固定显示“顺序(⇔)”且不受 m 影响。
+            // 需求：循环模式仅对本地音频有效；系统(MPRIS)来源固定显示“顺序()”且不受 m 影响。
             if app.player.mode == PlayMode::LocalPlayback {
                 app.player.repeat_mode = app.player.repeat_mode.next();
             }
@@ -879,15 +927,25 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
                 let _ = app.config.save();
             }
         }
-        // Kitty graphics
+        // Visualize
         4 => {
+            if delta != 0 {
+                app.config.visualize = match app.config.visualize {
+                    crate::data::config::VisualizeMode::Bars => crate::data::config::VisualizeMode::Oscilloscope,
+                    crate::data::config::VisualizeMode::Oscilloscope => crate::data::config::VisualizeMode::Bars,
+                };
+                let _ = app.config.save();
+            }
+        }
+        // Kitty graphics
+        5 => {
             if delta != 0 && app.kitty_graphics_supported {
                 app.config.kitty_graphics = !app.config.kitty_graphics;
                 let _ = app.config.save();
             }
         }
         // Cover image compression/scale (kitty-only)
-        5 => {
+        6 => {
             if delta == 0 {
                 return;
             }

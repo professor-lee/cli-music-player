@@ -45,11 +45,12 @@ impl RepeatMode {
 
     pub fn symbol(self) -> &'static str {
         match self {
-            // 需求：顺序播放 ⇔，随机播放 ≠，列表循环 ∞，单曲循环 ↻
-            RepeatMode::Sequence => "⇔",
-            RepeatMode::Shuffle => "≠",
-            RepeatMode::LoopAll => "∞",
-            RepeatMode::LoopOne => "↻",
+            // 需求：使用 Nerd Font 图标
+            // 顺序播放 ，随机播放 ，列表循环 ，单曲循环 
+            RepeatMode::Sequence => "",
+            RepeatMode::Shuffle => "",
+            RepeatMode::LoopAll => "",
+            RepeatMode::LoopOne => "",
         }
     }
 }
@@ -161,6 +162,14 @@ impl Default for TrackMetadata {
 #[derive(Debug, Clone)]
 pub struct SpectrumData {
     pub bars: [f32; 64],
+    pub stereo_left: [f32; 64],
+    pub stereo_right: [f32; 64],
+
+    // Oscilloscope synthesis state (kept across frames for stability).
+    pub osc_phase_left: [f32; 64],
+    pub osc_phase_right: [f32; 64],
+
+    pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub fft_size: usize,
 }
@@ -169,6 +178,11 @@ impl Default for SpectrumData {
     fn default() -> Self {
         Self {
             bars: [0.0; 64],
+            stereo_left: [0.0; 64],
+            stereo_right: [0.0; 64],
+            osc_phase_left: [0.0; 64],
+            osc_phase_right: [0.0; 64],
+            samples: Vec::new(),
             sample_rate: 44100,
             fft_size: 2048,
         }

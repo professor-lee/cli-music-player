@@ -2,6 +2,7 @@ theme = "frappe"
 ui_fps = 30
 spectrum_hz = 30
 mpris_poll_ms = 100
+visualize = "bars"
 transparent_background = true
 album_border = false
 kitty_graphics = false

@@ -38,9 +38,9 @@ It supports local playback and system monitoring, and includes spectrum visualiz
 - System playback monitoring (MPRIS)
 - Playlist panel
 - Album cover rendering: ASCII art (default) or Kitty graphics (optional, if supported)
-- Settings modal (theme, transparent background, album border, UI FPS 30/60, Kitty graphics toggle, cover quality)
+- Settings modal (theme, transparent background, album border, UI FPS 30/60, visualization mode, Kitty graphics toggle, cover quality)
 - Lyrics display
-- Spectrum visualization (prefers `cava` bars when available; falls back to internal FFT)
+- Visualization: spectrum bars / oscilloscope (Braille overlay from stereo `cava` bars when available; falls back to internal FFT)
 
 <h2 align="center">Tech Stack</h2>
 
@@ -50,6 +50,23 @@ It supports local playback and system monitoring, and includes spectrum visualiz
 - Visualization: `cava` (external bars) or internal FFT fallback
 
 <h2 align="center">Development Setup</h2>
+
+### Terminal Font (⚠️Nerd Font needed)
+
+The control buttons and playback mode indicators use Nerd Font icon glyphs. If your terminal font is not a Nerd Font (patched), you may see missing-glyph boxes.
+
+Recommended fonts: JetBrainsMono Nerd Font, FiraCode Nerd Font, Hack Nerd Font (any Nerd Font works).
+
+Icon mapping:
+
+- Play: 
+- Pause: 
+- Previous: 
+- Next: 
+- Shuffle: 
+- Repeat one: 
+- Repeat all: 
+- Sequential: 
 
 ### Requirements (Linux)
 

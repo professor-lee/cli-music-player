@@ -38,9 +38,9 @@
 - 系统播放监控（MPRIS）
 - 播放列表侧边栏
 - 专辑封面渲染：默认 ASCII 字符封面；如终端支持可启用 Kitty 图片封面
-- Settings 弹窗（主题、透明背景、专辑边框、UI FPS 30/60、Kitty 开关、封面质量）
+- Settings 弹窗（主题、透明背景、专辑边框、UI FPS 30/60、可视化模式、Kitty 开关、封面质量）
 - 歌词显示
-- 频谱可视化（优先使用 `cava` bars；不可用时回退内部 FFT）
+- 可视化：频谱 Bars / 示波器（Oscilloscope，Braille 点阵叠加左右声道；优先使用 `cava` 数值，不可用时回退内部 FFT）
 
 <h2 align="center">技术栈</h2>
 
@@ -50,6 +50,23 @@
 - 可视化：`cava`（外部 bars）或内部 FFT 回退
 
 <h2 align="center">开发与运行</h2>
+
+### 终端字体（⚠️需要Nerd Font）
+
+本项目 UI 控制区使用 Nerd Font 图标字符。如果你的终端字体不包含 Nerd Font 补丁字形，相关位置可能显示为方块/乱码。
+
+建议使用任一 Nerd Font（例如：JetBrainsMono Nerd Font、FiraCode Nerd Font、Hack Nerd Font），并在终端/模拟器里将字体设置为该字体。
+
+图标对照：
+
+- 播放：
+- 暂停：
+- 上一首：
+- 下一首：
+- 随机播放：
+- 单曲循环：
+- 列表循环：
+- 顺序播放：
 
 ### 依赖（Linux）
 

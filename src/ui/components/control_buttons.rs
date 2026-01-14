@@ -9,20 +9,20 @@ use unicode_width::UnicodeWidthStr;
 
 pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
     let play = match app.player.playback {
-        PlaybackState::Playing => "[⏸]",
-        _ => "[⏯]",
+        PlaybackState::Playing => "[]",
+        _ => "[]",
     };
 
-    // 需求：外部音源（SystemMonitor）固定显示“顺序播放(⇔)”
+    // 需求：外部音源（SystemMonitor）固定显示“顺序播放()”
     let repeat_symbol = match app.player.mode {
         PlayMode::LocalPlayback => app.player.repeat_mode.symbol(),
-        _ => "⇔",
+        _ => "",
     };
 
     let line = Line::from(vec![
-        Span::styled("[⏮︎] ", Style::default().fg(app.theme.color_text())),
+        Span::styled("[] ", Style::default().fg(app.theme.color_text())),
         Span::styled(format!("{} ", play), Style::default().fg(app.theme.color_text())),
-        Span::styled("[⏭] ", Style::default().fg(app.theme.color_text())),
+        Span::styled("[] ", Style::default().fg(app.theme.color_text())),
         Span::styled(repeat_symbol, Style::default().fg(app.theme.color_subtext())),
     ]);
 
@@ -39,18 +39,18 @@ pub fn hit_test(area: Rect, app: &AppState, col: u16, row: u16) -> Option<Action
         return None;
     }
     let play = match app.player.playback {
-        PlaybackState::Playing => "[⏸]",
-        _ => "[⏯]",
+        PlaybackState::Playing => "[]",
+        _ => "[]",
     };
     let repeat_symbol = match app.player.mode {
         PlayMode::LocalPlayback => app.player.repeat_mode.symbol(),
-        _ => "⇔",
+        _ => "",
     };
 
     // Must match render() exactly (including spaces) because we align by glyph width.
-    let s_prev = "[⏮︎]";
+    let s_prev = "[]";
     let s_play = play;
-    let s_next = "[⏭]";
+    let s_next = "[]";
     let sep = " ";
     let label = format!("{s_prev}{sep}{s_play}{sep}{s_next}{sep}{repeat_symbol}");
 

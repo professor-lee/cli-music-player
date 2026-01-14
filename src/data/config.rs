@@ -13,6 +13,9 @@ pub struct Config {
     pub spectrum_hz: u32,
     pub mpris_poll_ms: u64,
 
+    #[serde(default = "default_visualize")]
+    pub visualize: VisualizeMode,
+
     #[serde(default = "default_eq_bands_db")]
     pub eq_bands_db: [f32; crate::app::state::EQ_BANDS],
 
@@ -27,6 +30,17 @@ pub struct Config {
 
     #[serde(default = "default_kitty_cover_scale_percent")]
     pub kitty_cover_scale_percent: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VisualizeMode {
+    Bars,
+    Oscilloscope,
+}
+
+fn default_visualize() -> VisualizeMode {
+    VisualizeMode::Bars
 }
 
 fn default_album_border() -> bool {
@@ -48,6 +62,7 @@ impl Default for Config {
             ui_fps: 30,
             spectrum_hz: 30,
             mpris_poll_ms: 100,
+            visualize: default_visualize(),
             eq_bands_db: default_eq_bands_db(),
             transparent_background: false,
             album_border: default_album_border(),

@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct CavaRunner {
-    bars: Arc<Mutex<[f32; 64]>>,
+    left: Arc<Mutex<[f32; 64]>>,
+    right: Arc<Mutex<[f32; 64]>>,
     child: Child,
     _reader: thread::JoinHandle<()>,
     cfg_path: String,
@@ -17,10 +18,13 @@ pub struct CavaRunner {
 impl CavaRunner {
     pub fn start(framerate_hz: u32) -> Result<Self> {
         // Minimal config we generate ourselves (do not copy upstream example config).
-        // Uses raw ascii output to stdout, 64 mono bars, newline-delimited frames.
+        // Uses raw ascii output to stdout, 64 bars per channel.
+        // We request stereo; depending on cava version/backend, it may emit:
+        // - 2 lines per frame (one per channel, each 64 values), OR
+        // - 1 line per frame containing 128 values.
         let framerate_hz = framerate_hz.clamp(10, 120);
         let cfg = format!(
-            "[general]\nframerate = {fr}\nbars = 64\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend (pipewire/pulse/etc).\n\n[output]\nmethod = raw\nchannels = mono\nmono_option = average\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
+            "[general]\nframerate = {fr}\nbars = 64\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend (pipewire/pulse/etc).\n\n[output]\nmethod = raw\nchannels = stereo\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
             fr = framerate_hz
         );
 
@@ -42,20 +46,45 @@ impl CavaRunner {
             .take()
             .context("failed to capture cava stdout")?;
 
-        let bars: Arc<Mutex<[f32; 64]>> = Arc::new(Mutex::new([0.0; 64]));
-        let bars_cloned = Arc::clone(&bars);
+        let left: Arc<Mutex<[f32; 64]>> = Arc::new(Mutex::new([0.0; 64]));
+        let right: Arc<Mutex<[f32; 64]>> = Arc::new(Mutex::new([0.0; 64]));
+        let left_cloned = Arc::clone(&left);
+        let right_cloned = Arc::clone(&right);
 
         let reader = thread::spawn(move || {
             let mut br = BufReader::new(stdout);
             let mut line = String::new();
+            let mut next_is_left = true;
             loop {
                 line.clear();
                 match br.read_line(&mut line) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        if let Some(frame) = parse_frame_ascii(&line) {
-                            let mut guard = bars_cloned.lock().unwrap();
-                            *guard = frame;
+                        let frames = parse_frames_ascii(&line);
+                        match frames.len() {
+                            1 => {
+                                let frame = frames[0];
+                                if next_is_left {
+                                    let mut g = left_cloned.lock().unwrap();
+                                    *g = frame;
+                                } else {
+                                    let mut g = right_cloned.lock().unwrap();
+                                    *g = frame;
+                                }
+                                next_is_left = !next_is_left;
+                            }
+                            2 => {
+                                {
+                                    let mut g = left_cloned.lock().unwrap();
+                                    *g = frames[0];
+                                }
+                                {
+                                    let mut g = right_cloned.lock().unwrap();
+                                    *g = frames[1];
+                                }
+                                next_is_left = true;
+                            }
+                            _ => {}
                         }
                     }
                     Err(_) => break,
@@ -64,7 +93,8 @@ impl CavaRunner {
         });
 
         Ok(Self {
-            bars,
+            left,
+            right,
             child,
             _reader: reader,
             cfg_path,
@@ -72,7 +102,17 @@ impl CavaRunner {
     }
 
     pub fn latest_bars(&self) -> [f32; 64] {
-        *self.bars.lock().unwrap()
+        let l = *self.left.lock().unwrap();
+        let r = *self.right.lock().unwrap();
+        let mut out = [0.0f32; 64];
+        for i in 0..64 {
+            out[i] = ((l[i] + r[i]) * 0.5).clamp(0.0, 1.0);
+        }
+        out
+    }
+
+    pub fn latest_stereo_bars(&self) -> ([f32; 64], [f32; 64]) {
+        (*self.left.lock().unwrap(), *self.right.lock().unwrap())
     }
 }
 
@@ -117,30 +157,35 @@ impl Drop for CavaRunner {
     }
 }
 
-fn parse_frame_ascii(s: &str) -> Option<[f32; 64]> {
+fn parse_frames_ascii(s: &str) -> Vec<[f32; 64]> {
     // ascii_max_range=1000, bar_delimiter=';'
-    let mut out = [0.0f32; 64];
-    let mut idx = 0usize;
-
+    // Can be 64 values (one channel) or 128 values (two channels) on a single line.
+    let mut vals: Vec<f32> = Vec::new();
     for part in s.split(|c: char| c == ';' || c == '\n' || c == '\r' || c == ' ' || c == '\t') {
         if part.is_empty() {
             continue;
         }
-        let v: u32 = part.parse().ok()?;
-        let v = (v as f32 / 1000.0).clamp(0.0, 1.0);
-        if idx < 64 {
-            out[idx] = v;
-            idx += 1;
-        } else {
-            break;
+        if let Ok(v) = part.parse::<u32>() {
+            vals.push((v as f32 / 1000.0).clamp(0.0, 1.0));
         }
     }
 
-    if idx == 64 {
-        Some(out)
-    } else {
-        None
+    if vals.len() == 64 {
+        let mut out = [0.0f32; 64];
+        out.copy_from_slice(&vals);
+        return vec![out];
     }
+
+    if vals.len() == 128 {
+        let mut l = [0.0f32; 64];
+        let mut r = [0.0f32; 64];
+        // Most commonly: left block then right block.
+        l.copy_from_slice(&vals[0..64]);
+        r.copy_from_slice(&vals[64..128]);
+        return vec![l, r];
+    }
+
+    Vec::new()
 }
 
 fn temp_cfg_path() -> String {
