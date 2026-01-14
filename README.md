@@ -67,6 +67,7 @@ Icon mapping:
 - Repeat one: 
 - Repeat all: 
 - Sequential: 
+> Oops, GitHub doesn't seem to support displaying Nerd Font. You can check the icons at https://www.nerdfonts.com/cheat-sheet.
 
 ### Requirements (Linux)
 

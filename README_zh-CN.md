@@ -67,6 +67,7 @@
 - 单曲循环：
 - 列表循环：
 - 顺序播放：
+> Oops,GitHub好像不支持显示nerdfont,可以去https://www.nerdfonts.com/cheat-sheet 查看图标。
 
 ### 依赖（Linux）
 
