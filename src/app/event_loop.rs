@@ -67,7 +67,10 @@ pub fn run(app: &mut AppState) -> Result<()> {
                     let action = map_mouse(m);
                     handle_action(app, &mut mode_manager, system_volume.as_ref(), action, &last_layout)?;
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => {
+                    // Kitty graphics placements may get cleared on terminal resize.
+                    tui.on_resize();
+                }
                 _ => {}
             }
         }

@@ -110,6 +110,21 @@ impl Tui {
         Ok(())
     }
 
+    /// Terminal resize can clear/lose kitty graphic placements. Mark placements dirty so
+    /// the next draw will re-place images.
+    ///
+    /// Some terminals also drop the stored image data on resize; in that case, we must
+    /// force a re-transmit, otherwise subsequent `place` commands show nothing.
+    pub fn on_resize(&mut self) {
+        self.kitty_info_last = None;
+        self.kitty_playlist_last = None;
+
+        // Force re-encode/re-transmit on demand.
+        self.kitty_transmitted.clear();
+        self.kitty_pending.clear();
+        while self.kitty_rx.try_recv().is_ok() {}
+    }
+
     pub fn draw(&mut self, app: &mut AppState) -> Result<UiLayout> {
         if app.toast.as_ref().map(|(m, _)| m.as_str()) == Some("Bye") {
             self.should_quit = true;
