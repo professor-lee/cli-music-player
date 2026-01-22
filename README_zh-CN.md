@@ -112,6 +112,8 @@ cargo build --release
 3. 与程序可执行文件同目录：`./third_party/cava/cava`
 4. `PATH` 中的 `cava`
 
+如果以上都不可用，并且构建时启用了 `--features bundle-cava`，程序会把内置的 `cava` 解压到系统临时目录，仅在本次运行中使用，退出时自动删除。
+
 可选安装 `cava`（推荐）：
 
 ```bash
@@ -130,7 +132,7 @@ sudo pacman -S cava
 cargo build --release --features bundle-cava
 ```
 
-该模式会在 Cargo 构建过程中下载并编译上游 `cava`，然后把生成的 `cava` 可执行文件复制到本项目产物旁边（例如 `target/release/cava`），运行时会优先使用它。
+该模式会在 Cargo 构建过程中下载并编译上游 `cava`，并将其内置到程序中；运行时如果系统未安装 `cava`，会临时解压到系统临时目录使用，退出后自动删除。
 
 注意：
 

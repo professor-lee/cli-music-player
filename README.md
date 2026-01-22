@@ -112,6 +112,8 @@ If `cava` is not available, it will fall back to the internal FFT pipeline.
 3. Next to the app executable: `./third_party/cava/cava`
 4. `cava` in `PATH`
 
+If none of the above are available and the app was built with `--features bundle-cava`, it will extract the embedded `cava` to a temporary directory for the current session.
+
 Install `cava` (optional but recommended):
 
 ```bash
@@ -130,7 +132,7 @@ If you want the project to build its own `cava` binary automatically (instead of
 cargo build --release --features bundle-cava
 ```
 
-This will download and build upstream `cava` from source during the Cargo build, then copy the resulting `cava` binary next to the app binary (e.g. `target/release/cava`).
+This will download and build upstream `cava` from source during the Cargo build, then embed the resulting `cava` binary into the app. At runtime, if no system `cava` is found, the app will extract it into a temporary directory and use it for the current session (it is deleted when the app exits).
 
 Notes:
 

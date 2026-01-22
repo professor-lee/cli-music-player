@@ -46,6 +46,7 @@ fn real_main() -> Result<()> {
             "cargo:warning=bundle-cava: using existing {}",
             target_cava.display()
         );
+        ensure_out_dir_copy(&target_cava, &out_dir)?;
         return Ok(());
     }
 
@@ -145,6 +146,8 @@ fn real_main() -> Result<()> {
         perms.set_mode(0o755);
         fs::set_permissions(&target_cava, perms)?;
     }
+
+    ensure_out_dir_copy(&target_cava, &out_dir)?;
 
     println!(
         "cargo:warning=bundle-cava: installed {}",
@@ -287,4 +290,19 @@ fn find_target_profile_dir(out_dir: &Path) -> Option<PathBuf> {
         cur = parent;
     }
     None
+}
+
+fn ensure_out_dir_copy(built: &Path, out_dir: &Path) -> Result<()> {
+    let dst = out_dir.join("cava.bin");
+    if dst.is_file() {
+        return Ok(());
+    }
+    fs::copy(built, &dst).with_context(|| {
+        format!(
+            "copy built cava from {} to {}",
+            built.display(),
+            dst.display()
+        )
+    })?;
+    Ok(())
 }

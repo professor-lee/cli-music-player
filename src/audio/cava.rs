@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 pub struct CavaRunner {
     left: Arc<Mutex<[f32; 64]>>,
@@ -13,6 +14,7 @@ pub struct CavaRunner {
     child: Child,
     _reader: thread::JoinHandle<()>,
     cfg_path: String,
+    _temp_dir: Option<TempDir>,
 }
 
 impl CavaRunner {
@@ -31,7 +33,7 @@ impl CavaRunner {
         let cfg_path = temp_cfg_path();
         fs::write(&cfg_path, cfg).with_context(|| format!("write cava config: {cfg_path}"))?;
 
-        let cava_exe = find_cava_executable();
+        let (cava_exe, temp_dir) = resolve_cava_executable()?;
         let mut child = Command::new(&cava_exe)
             .arg("-p")
             .arg(&cfg_path)
@@ -98,6 +100,7 @@ impl CavaRunner {
             child,
             _reader: reader,
             cfg_path,
+            _temp_dir: temp_dir,
         })
     }
 
@@ -116,7 +119,7 @@ impl CavaRunner {
     }
 }
 
-fn find_cava_executable() -> PathBuf {
+fn find_cava_executable() -> Option<PathBuf> {
     // Resolution order:
     // 1) env var override
     // 2) bundled next to our executable or in ./third_party/cava/
@@ -124,7 +127,7 @@ fn find_cava_executable() -> PathBuf {
     if let Some(p) = std::env::var_os("CLI_MUSIC_PLAYER_CAVA") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            return p;
+            return Some(p);
         }
     }
 
@@ -142,11 +145,59 @@ fn find_cava_executable() -> PathBuf {
 
     for p in candidates {
         if p.is_file() {
-            return p;
+            return Some(p);
         }
     }
 
-    PathBuf::from("cava")
+    if which_in_path("cava").is_some() {
+        return Some(PathBuf::from("cava"));
+    }
+
+    None
+}
+
+fn resolve_cava_executable() -> Result<(PathBuf, Option<TempDir>)> {
+    if let Some(p) = find_cava_executable() {
+        return Ok((p, None));
+    }
+
+    #[cfg(feature = "bundle-cava")]
+    {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("cli-music-player-cava-")
+            .tempdir()
+            .context("create temp dir for cava")?;
+        let path = temp_dir.path().join("cava");
+        fs::write(&path, embedded_cava_bytes()).with_context(|| format!("write temp cava: {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms)?;
+        }
+
+        return Ok((path, Some(temp_dir)));
+    }
+
+    Err(anyhow::anyhow!("cava not found"))
+}
+
+fn which_in_path(bin: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for p in std::env::split_paths(&paths) {
+        let cand = p.join(bin);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bundle-cava")]
+fn embedded_cava_bytes() -> &'static [u8] {
+    include_bytes!(concat!(env!("OUT_DIR"), "/cava.bin"))
 }
 
 impl Drop for CavaRunner {
