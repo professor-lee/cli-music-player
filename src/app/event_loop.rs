@@ -57,6 +57,11 @@ pub fn run(app: &mut AppState) -> Result<()> {
         let frame_start = Instant::now();
 
         // poll input (non-blocking-ish)
+        // apply async remote metadata results (lyrics/cover/fingerprint)
+        let results = app.drain_remote_fetch_results();
+        if !results.is_empty() {
+            apply_remote_fetch_results(app, &mut mode_manager, results);
+        }
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 Event::Key(k) => {
@@ -105,6 +110,14 @@ pub fn run(app: &mut AppState) -> Result<()> {
                     }
                 }
 
+                let changed_any = before_track.title != app.player.track.title
+                    || before_track.artist != app.player.track.artist
+                    || before_track.album != app.player.track.album
+                    || before_track.cover_hash != app.player.track.cover_hash;
+                if changed_any && app.player.mode == PlayMode::SystemMonitor {
+                    app.queue_remote_fetch(None);
+                }
+
                 // If user requested next/prev in SystemMonitor, animate when the track actually changes.
                 if app.player.mode == PlayMode::SystemMonitor {
                     if let Some((from, dir, _at)) = app.pending_system_cover_anim.take() {
@@ -115,6 +128,7 @@ pub fn run(app: &mut AppState) -> Result<()> {
                         if changed {
                             let to = CoverSnapshot::from(&app.player.track);
                             app.start_cover_anim(from, to, dir, frame_start);
+                            app.queue_remote_fetch(None);
                         }
                     }
                 }
@@ -133,7 +147,8 @@ pub fn run(app: &mut AppState) -> Result<()> {
                         let (l, r) = c.latest_stereo_bars();
                         app.spectrum.stereo_left = l;
                         app.spectrum.stereo_right = r;
-                        app.spectrum.bars = c.latest_bars();
+                        let raw = c.latest_bars();
+                        app.spectrum.bars = app.spectrum_bar_smoother.apply(raw);
                         app.spectrum.samples.clear();
                     } else {
                         update_spectrum_from_samples(app, &mut spectrum, &mut mode_manager, &mut audio_capture, frame_start);
@@ -275,6 +290,8 @@ fn handle_local_track_finished(app: &mut AppState, mode_manager: &mut ModeManage
             let to = CoverSnapshot::from(&app.player.track);
             app.start_cover_anim(from, to, -1, Instant::now());
 
+            app.queue_remote_fetch(Some(&path));
+
             if let Some(folder) = app.local_folder.as_deref() {
                 let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
             }
@@ -350,10 +367,18 @@ fn handle_action(
             }
         }
         Action::FolderChar(c) => {
-            app.folder_input.buf.push(c);
+            if app.overlay == Overlay::FolderInput {
+                app.folder_input.buf.push(c);
+            } else if app.overlay == Overlay::AcoustIdModal {
+                app.acoustid_input.push(c);
+            }
         }
         Action::FolderBackspace => {
-            app.folder_input.buf.pop();
+            if app.overlay == Overlay::FolderInput {
+                app.folder_input.buf.pop();
+            } else if app.overlay == Overlay::AcoustIdModal {
+                app.acoustid_input.pop();
+            }
         }
         Action::CloseOverlay => {
             if app.overlay == Overlay::Playlist {
@@ -362,6 +387,8 @@ fn handle_action(
                 // here just set target
                 app.playlist_slide_target_x = -(layout.left_width as i16);
                 app.overlay = Overlay::None;
+            } else if app.overlay == Overlay::AcoustIdModal || app.overlay == Overlay::BarSettingsModal {
+                app.overlay = Overlay::SettingsModal;
             } else {
                 app.close_overlay();
             }
@@ -433,6 +460,10 @@ fn handle_action(
                             app.local_view_album_cover = res.album_cover.as_ref().map(|(b, _)| b.clone());
                             app.local_view_album_cover_hash = res.album_cover.map(|(_, h)| Some(h)).unwrap_or(None);
 
+                            if let Some(cur_path) = app.playlist.current_path().cloned() {
+                                app.queue_remote_fetch(Some(&cur_path));
+                            }
+
                             // Ensure .order.toml exists and tracks last album/song for local browsing.
                             if app.local_folder_kind == LocalFolderKind::MultiAlbum {
                                 if let (Some(root), Some(play_folder)) = (app.local_root_folder.as_deref(), app.local_folder.as_deref()) {
@@ -455,6 +486,8 @@ fn handle_action(
                         if let Ok(track) = mode_manager.local.play_file(&path) {
                             app.player.mode = PlayMode::LocalPlayback;
                             app.player.track = track;
+
+                            app.queue_remote_fetch(Some(&path));
 
                             if let Some(folder) = view_folder {
                                 app.local_folder = Some(folder.clone());
@@ -481,13 +514,47 @@ fn handle_action(
                             app.config.album_border = !app.config.album_border;
                             let _ = app.config.save();
                         }
-                        4 => {
+                        7 => {
+                            app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
+                            let _ = app.config.save();
+                            if app.config.lyrics_cover_fetch {
+                                app.reset_remote_fetch_state();
+                                if app.player.mode == PlayMode::LocalPlayback {
+                                    if let Some(cur_path) = app.playlist.current_path().cloned() {
+                                        app.queue_remote_fetch(Some(&cur_path));
+                                    }
+                                } else if app.player.mode == PlayMode::SystemMonitor {
+                                    app.queue_remote_fetch(None);
+                                }
+                            }
+                        }
+                        8 => {
+                            app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
+                            let _ = app.config.save();
+                        }
+                        9 => {
+                            if !app.config.acoustid_api_key.trim().is_empty() {
+                                app.config.audio_fingerprint = !app.config.audio_fingerprint;
+                                let _ = app.config.save();
+                            }
+                        }
+                        10 => {
+                            app.acoustid_input = app.config.acoustid_api_key.clone();
+                            app.overlay = Overlay::AcoustIdModal;
+                        }
+                        3 => {
                             // Visualize mode toggle
                             app.config.visualize = match app.config.visualize {
                                 crate::data::config::VisualizeMode::Bars => crate::data::config::VisualizeMode::Oscilloscope,
                                 crate::data::config::VisualizeMode::Oscilloscope => crate::data::config::VisualizeMode::Bars,
                             };
                             let _ = app.config.save();
+                        }
+                        4 => {
+                            if app.config.visualize == crate::data::config::VisualizeMode::Bars {
+                                app.bar_settings_selected = 0;
+                                app.overlay = Overlay::BarSettingsModal;
+                            }
                         }
                         5 => {
                             if app.kitty_graphics_supported {
@@ -497,6 +564,28 @@ fn handle_action(
                         }
                         _ => {}
                     }
+                }
+                Overlay::BarSettingsModal => {
+                    match app.bar_settings_selected {
+                        0 => {
+                            app.config.super_smooth_bar = !app.config.super_smooth_bar;
+                            let _ = app.config.save();
+                        }
+                        1 => {
+                            app.config.bars_gap = !app.config.bars_gap;
+                            let _ = app.config.save();
+                        }
+                        _ => {}
+                    }
+                }
+                Overlay::AcoustIdModal => {
+                    let key = app.acoustid_input.trim().to_string();
+                    app.config.acoustid_api_key = key.clone();
+                    if key.is_empty() {
+                        app.config.audio_fingerprint = false;
+                    }
+                    let _ = app.config.save();
+                    app.overlay = Overlay::SettingsModal;
                 }
                 Overlay::HelpModal => {
                     app.close_overlay();
@@ -605,11 +694,18 @@ fn handle_action(
         }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 7;
+                let count = 11;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
+                }
+            } else if app.overlay == Overlay::BarSettingsModal {
+                let count = 2;
+                if app.bar_settings_selected == 0 {
+                    app.bar_settings_selected = count - 1;
+                } else {
+                    app.bar_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
@@ -626,8 +722,11 @@ fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 7;
+                let count = 11;
                 app.settings_selected = (app.settings_selected + 1) % count;
+            } else if app.overlay == Overlay::BarSettingsModal {
+                let count = 2;
+                app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
                 if app.eq_selected < crate::app::state::EQ_BANDS {
@@ -644,6 +743,18 @@ fn handle_action(
         Action::ModalLeft => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, -1);
+            } else if app.overlay == Overlay::BarSettingsModal {
+                match app.bar_settings_selected {
+                    0 => {
+                        app.config.super_smooth_bar = !app.config.super_smooth_bar;
+                        let _ = app.config.save();
+                    }
+                    1 => {
+                        app.config.bars_gap = !app.config.bars_gap;
+                        let _ = app.config.save();
+                    }
+                    _ => {}
+                }
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::app::state::EQ_BANDS;
                 if app.eq_selected == 0 {
@@ -656,6 +767,18 @@ fn handle_action(
         Action::ModalRight => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, 1);
+            } else if app.overlay == Overlay::BarSettingsModal {
+                match app.bar_settings_selected {
+                    0 => {
+                        app.config.super_smooth_bar = !app.config.super_smooth_bar;
+                        let _ = app.config.save();
+                    }
+                    1 => {
+                        app.config.bars_gap = !app.config.bars_gap;
+                        let _ = app.config.save();
+                    }
+                    _ => {}
+                }
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::app::state::EQ_BANDS;
                 app.eq_selected = (app.eq_selected + 1) % count;
@@ -721,6 +844,8 @@ fn handle_action(
                             let to = CoverSnapshot::from(&app.player.track);
                             app.start_cover_anim(from, to, 1, Instant::now());
 
+                            app.queue_remote_fetch(Some(&path));
+
                             if let Some(folder) = app.local_folder.as_deref() {
                                 let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
                             }
@@ -750,6 +875,8 @@ fn handle_action(
                             app.player.track = track;
                             let to = CoverSnapshot::from(&app.player.track);
                             app.start_cover_anim(from, to, -1, Instant::now());
+
+                            app.queue_remote_fetch(Some(&path));
 
                             if let Some(folder) = app.local_folder.as_deref() {
                                 let _ = crate::playback::local_player::write_last_opened_song(folder, &path);
@@ -889,6 +1016,24 @@ fn theme_key(name: ThemeName) -> &'static str {
     }
 }
 
+fn apply_remote_fetch_results(app: &mut AppState, mode_manager: &mut ModeManager, results: Vec<crate::playback::remote_fetch::RemoteFetchResult>) {
+    let current_path = if app.player.mode == PlayMode::LocalPlayback {
+        app.playlist.current_path().cloned()
+    } else {
+        None
+    };
+    let current_key = crate::playback::remote_fetch::TrackKey::from_track(&app.player.track, current_path.as_deref());
+
+    for res in results {
+        if res.key == current_key {
+            res.apply_to(&mut app.player.track);
+        }
+        if let Some(path) = res.path.as_deref() {
+            mode_manager.local.update_cached_metadata(path, &res);
+        }
+    }
+}
+
 fn apply_settings_delta(app: &mut AppState, delta: i32) {
     match app.settings_selected {
         // Theme
@@ -923,15 +1068,8 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
                 let _ = app.config.save();
             }
         }
-        // UI FPS
-        3 => {
-            if delta != 0 {
-                app.config.ui_fps = if app.config.ui_fps >= 60 { 30 } else { 60 };
-                let _ = app.config.save();
-            }
-        }
         // Visualize
-        4 => {
+        3 => {
             if delta != 0 {
                 app.config.visualize = match app.config.visualize {
                     crate::data::config::VisualizeMode::Bars => crate::data::config::VisualizeMode::Oscilloscope,
@@ -940,6 +1078,8 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
                 let _ = app.config.save();
             }
         }
+        // Bar settings (Enter opens modal)
+        4 => {}
         // Kitty graphics
         5 => {
             if delta != 0 && app.kitty_graphics_supported {
@@ -964,6 +1104,39 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
             app.config.kitty_cover_scale_percent = v as u8;
             let _ = app.config.save();
         }
+        // Lyrics/Cover fetch
+        7 => {
+            if delta != 0 {
+                app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
+                let _ = app.config.save();
+                if app.config.lyrics_cover_fetch {
+                    app.reset_remote_fetch_state();
+                    if app.player.mode == PlayMode::LocalPlayback {
+                        if let Some(cur_path) = app.playlist.current_path().cloned() {
+                            app.queue_remote_fetch(Some(&cur_path));
+                        }
+                    } else if app.player.mode == PlayMode::SystemMonitor {
+                        app.queue_remote_fetch(None);
+                    }
+                }
+            }
+        }
+        // Lyrics/Cover download
+        8 => {
+            if delta != 0 {
+                app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
+                let _ = app.config.save();
+            }
+        }
+        // Audio fingerprint
+        9 => {
+            if delta != 0 && !app.config.acoustid_api_key.trim().is_empty() {
+                app.config.audio_fingerprint = !app.config.audio_fingerprint;
+                let _ = app.config.save();
+            }
+        }
+        // AcoustID API (Enter opens modal)
+        10 => {}
         _ => {}
     }
 }

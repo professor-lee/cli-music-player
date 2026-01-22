@@ -126,7 +126,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
                         f.render_widget(Block::default().style(Style::default().bg(bg)), inner);
                     }
                 } else {
-                    f.render_widget(Block::default().style(Style::default().bg(bg)), l.cover);
+                    let inner = l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                    if inner.width > 0 && inner.height > 0 {
+                        f.render_widget(Block::default().style(Style::default().bg(bg)), inner);
+                    }
                 }
 
                 // Pre-warm the ASCII cover cache while hidden so closing playlist is instant.
@@ -151,7 +154,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
                         f.render_widget(Paragraph::new(" ").style(Style::default().bg(dominant_bg)), inner);
                     }
                 } else {
-                    f.render_widget(Paragraph::new(" ").style(Style::default().bg(dominant_bg)), l.cover);
+                    let inner = l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                    if inner.width > 0 && inner.height > 0 {
+                        f.render_widget(Paragraph::new(" ").style(Style::default().bg(dominant_bg)), inner);
+                    }
                 }
 
                 // Hot-switch support: while kitty is on, pre-warm the ASCII cover in the background

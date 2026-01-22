@@ -35,6 +35,15 @@ pub fn read_metadata(path: &Path) -> Result<TrackMetadata> {
         }
     }
 
+    // Per-track cover in subfolder: <dir>/cover/<stem>.(jpg|png)
+    if meta.cover.is_none() {
+        if let Some((bytes, hash)) = read_cover_for_audio(path) {
+            meta.cover_hash = Some(hash);
+            meta.cover = Some(bytes);
+            meta.cover_folder = path.parent().map(|p| p.to_path_buf());
+        }
+    }
+
     // Fallback: local folder cover image near the audio file.
     if meta.cover.is_none() {
         let folder = path.parent().unwrap_or(Path::new("."));
@@ -110,6 +119,27 @@ pub fn read_cover_from_folder(dir: &Path) -> Option<(Vec<u8>, u64)> {
     None
 }
 
+fn read_cover_for_audio(audio_path: &Path) -> Option<(Vec<u8>, u64)> {
+    let Some(folder) = audio_path.parent() else {
+        return None;
+    };
+    let Some(stem) = audio_path.file_stem().and_then(|s| s.to_str()) else {
+        return None;
+    };
+    let exts = ["jpg", "jpeg", "png"];
+    let cover_dir = folder.join("cover");
+    for ext in exts {
+        let p = cover_dir.join(format!("{stem}.{ext}"));
+        if let Ok(bytes) = fs::read(&p) {
+            if !bytes.is_empty() {
+                let hash = hash_bytes(&bytes);
+                return Some((bytes, hash));
+            }
+        }
+    }
+    None
+}
+
 fn read_embedded_lyrics(tagged: &lofty::TaggedFile) -> Option<Vec<LyricLine>> {
     // Try primary tag first, then other tags.
     if let Some(t) = tagged.primary_tag() {
@@ -150,12 +180,24 @@ fn read_lyrics_from_tag(tag: &Tag) -> Option<Vec<LyricLine>> {
 }
 
 fn read_lrc_for_audio(audio_path: &Path) -> Option<Vec<LyricLine>> {
-    let lrc_path = audio_path.with_extension("lrc");
-    let content = fs::read_to_string(lrc_path).ok()?;
-    parse_lrc(&content)
+    let mut candidates = Vec::new();
+    candidates.push(audio_path.with_extension("lrc"));
+
+    if let (Some(folder), Some(stem)) = (audio_path.parent(), audio_path.file_stem().and_then(|s| s.to_str())) {
+        candidates.push(folder.join("lrc").join(format!("{stem}.lrc")));
+    }
+
+    for p in candidates {
+        if let Ok(content) = fs::read_to_string(&p) {
+            if let Some(lines) = parse_lrc(&content).or_else(|| parse_plain_lyrics(&content)) {
+                return Some(lines);
+            }
+        }
+    }
+    None
 }
 
-fn parse_lrc(content: &str) -> Option<Vec<LyricLine>> {
+pub fn parse_lrc(content: &str) -> Option<Vec<LyricLine>> {
     let mut out: Vec<LyricLine> = Vec::new();
 
     for raw in content.lines() {
@@ -194,6 +236,19 @@ fn parse_lrc(content: &str) -> Option<Vec<LyricLine>> {
         return None;
     }
     out.sort_by_key(|l| l.start_ms);
+    Some(out)
+}
+
+pub fn parse_plain_lyrics(content: &str) -> Option<Vec<LyricLine>> {
+    let mut non_empty = content.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = non_empty.next()?.to_string();
+    let second = non_empty.next().map(|s| s.to_string());
+
+    let mut out = Vec::new();
+    out.push(LyricLine { start_ms: 0, text: first });
+    if let Some(s2) = second {
+        out.push(LyricLine { start_ms: u64::MAX, text: s2 });
+    }
     Some(out)
 }
 

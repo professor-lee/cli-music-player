@@ -30,6 +30,24 @@ pub struct Config {
 
     #[serde(default = "default_kitty_cover_scale_percent")]
     pub kitty_cover_scale_percent: u8,
+
+    #[serde(default)]
+    pub super_smooth_bar: bool,
+
+    #[serde(default)]
+    pub bars_gap: bool,
+
+    #[serde(default)]
+    pub lyrics_cover_fetch: bool,
+
+    #[serde(default)]
+    pub lyrics_cover_download: bool,
+
+    #[serde(default)]
+    pub audio_fingerprint: bool,
+
+    #[serde(default)]
+    pub acoustid_api_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +77,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "mocha".to_string(),
-            ui_fps: 30,
+            ui_fps: 60,
             spectrum_hz: 30,
             mpris_poll_ms: 100,
             visualize: default_visualize(),
@@ -68,6 +86,12 @@ impl Default for Config {
             album_border: default_album_border(),
             kitty_graphics: false,
             kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
+            super_smooth_bar: false,
+            bars_gap: false,
+            lyrics_cover_fetch: false,
+            lyrics_cover_download: false,
+            audio_fingerprint: false,
+            acoustid_api_key: String::new(),
         }
     }
 }

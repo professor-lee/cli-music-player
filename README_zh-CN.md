@@ -38,8 +38,11 @@
 - 系统播放监控（MPRIS）
 - 播放列表侧边栏
 - 专辑封面渲染：默认 ASCII 字符封面；如终端支持可启用 Kitty 图片封面
-- Settings 弹窗（主题、透明背景、专辑边框、UI FPS 30/60、可视化模式、Kitty 开关、封面质量）
+- Settings 弹窗（主题、透明背景、专辑边框、可视化模式、Bar 设置、Kitty 开关、封面质量、歌词/封面获取与下载、音频指纹识别、AcoustID API Key）
 - 歌词显示
+- 歌词获取：优先读取内嵌或本地 LRC（含同名 .lrc 与 lrc/ 目录），无则异步调用 LRCLIB
+- 封面获取：优先读取内嵌或本地封面（含 cover/ 目录），无则异步使用 MusicBrainz + Cover Art Archive
+- 无元数据时可选用 Chromaprint 生成指纹，通过 AcoustID 补全信息
 - 可视化：频谱 Bars / 示波器（Oscilloscope，Braille 点阵叠加左右声道；优先使用 `cava` 数值，不可用时回退内部 FFT）
 
 <h2 align="center">技术栈</h2>
@@ -75,7 +78,7 @@
 
 ```bash
 sudo apt update
-sudo apt install -y pkg-config libasound2-dev libdbus-1-dev
+sudo apt install -y pkg-config libasound2-dev libdbus-1-dev libchromaprint-dev
 ```
 
 ### 运行
@@ -189,6 +192,23 @@ cargo build --release
 
 - `kitty_graphics`：启用 Kitty 图形协议渲染（默认：`false`）
 - `kitty_cover_scale_percent`：封面质量百分比（默认：`50`；`100` 表示不下采样）
+
+Bars 相关配置项（位于 `config/default.toml`，仅 Bars 模式生效）：
+
+- `super_smooth_bar`：更细的高度分级字符（默认：`false`）
+- `bars_gap`：柱状间隔（默认：`false`）
+
+歌词/封面与指纹相关配置项（位于 `config/default.toml`）：
+
+- `lyrics_cover_fetch`：启用歌词/封面异步获取（默认：`false`）
+- `lyrics_cover_download`：将获取到的歌词/封面保存到本地（默认：`false`）
+- `audio_fingerprint`：启用音频指纹识别（默认：`false`，需先设置 AcoustID API Key）
+- `acoustid_api_key`：AcoustID API Key（在 Settings 弹窗内填写）
+
+歌词与封面保存位置（启用下载时）：
+
+- 歌词：与音频同目录的 lrc/ 文件夹，文件名与歌曲名相同（.lrc）
+- 封面：与音频同目录的 cover/ 文件夹，文件名与歌曲名相同（.jpg/.png）
 
 默认位置（Linux）：
 

@@ -182,7 +182,8 @@ impl Tui {
             layout_out.info_cover_image = if app.config.album_border {
                 info_l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 })
             } else {
-                info_l.cover
+                // Reserve one ring for visual breathing room even without border.
+                info_l.cover.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 })
             };
 
             // base styling
@@ -276,6 +277,8 @@ impl Tui {
             // modals (top-most)
             match app.overlay {
                 Overlay::SettingsModal => render_settings_modal(f, size, app),
+                Overlay::BarSettingsModal => render_bar_settings_modal(f, size, app),
+                Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app),
                 Overlay::EqModal => render_eq_modal(f, size, app),
                 _ => {}
@@ -305,7 +308,7 @@ impl Tui {
 
         // While Settings modal is open, do NOT refresh/re-transmit covers; keep using
         // the last applied quality so the cover doesn't constantly churn while tweaking.
-        let settings_open = app.overlay == Overlay::SettingsModal;
+        let settings_open = matches!(app.overlay, Overlay::SettingsModal | Overlay::AcoustIdModal | Overlay::BarSettingsModal);
 
         // 0 is used as an internal sentinel for "not initialized yet".
         if self.kitty_last_cover_quality == 0 {
@@ -510,8 +513,8 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    // Keep enough height to show header + all items (now 6 settings).
-    let area = centered_rect(size, 44, 12);
+    // Keep enough height to show header + all items.
+    let area = centered_rect(size, 62, 16);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -525,7 +528,7 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::styled(
-        "Up/Down Select  Left/Right Change  Esc Close",
+        "Up/Down Select  Left/Right Change  Enter Open  Esc Close",
         Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()),
     ));
     lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
@@ -552,6 +555,26 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         }
     );
 
+    let lyrics_fetch_label = format!(
+        "Lyrics/Cover fetch: {}",
+        if app.config.lyrics_cover_fetch { "On" } else { "Off" }
+    );
+    let lyrics_download_label = format!(
+        "Lyrics/Cover download: {}",
+        if app.config.lyrics_cover_download { "On" } else { "Off" }
+    );
+    let fingerprint_label = if app.config.acoustid_api_key.trim().is_empty() {
+        "Audio fingerprint: Off (API key required)".to_string()
+    } else {
+        format!("Audio fingerprint: {}", if app.config.audio_fingerprint { "On" } else { "Off" })
+    };
+    let acoustid_label = format!(
+        "AcoustID API: {}",
+        if app.config.acoustid_api_key.trim().is_empty() { "Not set" } else { "Set" }
+    );
+
+    let bar_setting_label = "Bar settings...".to_string();
+
     let items = [
         format!("Theme: {}", app.theme.name.as_label()),
         format!(
@@ -559,16 +582,22 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
             if app.config.transparent_background { "On" } else { "Off" }
         ),
         format!("Album border: {}", if app.config.album_border { "On" } else { "Off" }),
-        format!("UI FPS: {}", if app.config.ui_fps >= 60 { 60 } else { 30 }),
         visualize_label,
+        bar_setting_label,
         kitty_label,
         cover_compress_label,
+        lyrics_fetch_label,
+        lyrics_download_label,
+        fingerprint_label,
+        acoustid_label,
     ];
 
     for (idx, text) in items.iter().enumerate() {
         let disabled = match idx {
+            4 => app.config.visualize != crate::data::config::VisualizeMode::Bars,
             5 => !app.kitty_graphics_supported,
             6 => !app.kitty_graphics_supported || !app.config.kitty_graphics,
+            9 => app.config.acoustid_api_key.trim().is_empty(),
             _ => false,
         };
 
@@ -583,6 +612,85 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
             }
         } else if disabled {
             Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())
+        } else {
+            Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())
+        };
+        lines.push(Line::styled(format!("  {}", text), style));
+    }
+
+    let p = Paragraph::new(lines)
+        .style(Style::default().bg(app.theme.color_surface()))
+        .wrap(Wrap { trim: true });
+    f.render_widget(p, inner);
+}
+
+fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+    let area = centered_rect(size, 60, 8);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::ui::borders::SOLID_BORDER)
+        .title("AcoustID API Key")
+        .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()));
+    f.render_widget(block, area);
+
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(
+        "Enter Save  Esc Cancel",
+        Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()),
+    ));
+    lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
+    lines.push(Line::styled(
+        format!("API Key: {}", app.acoustid_input),
+        Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface()),
+    ));
+
+    let p = Paragraph::new(lines)
+        .style(Style::default().bg(app.theme.color_surface()))
+        .wrap(Wrap { trim: true });
+    f.render_widget(p, inner);
+}
+
+fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+    let area = centered_rect(size, 50, 10);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::ui::borders::SOLID_BORDER)
+        .title("Bar Settings")
+        .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()));
+    f.render_widget(block, area);
+
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(
+        "Up/Down Select  Left/Right Change  Esc Close",
+        Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()),
+    ));
+    lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
+
+    let items = [
+        format!(
+            "Super smooth bar: {}",
+            if app.config.super_smooth_bar { "On" } else { "Off" }
+        ),
+        format!(
+            "Bars gap: {}",
+            if app.config.bars_gap { "On" } else { "Off" }
+        ),
+    ];
+
+    for (idx, text) in items.iter().enumerate() {
+        let style = if idx == app.bar_settings_selected {
+            Style::default()
+                .fg(app.theme.color_base())
+                .bg(app.theme.color_accent())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())
         };

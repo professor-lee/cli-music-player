@@ -71,11 +71,38 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
         return Action::None;
     }
 
+    if overlay == Overlay::AcoustIdModal {
+        match ev.code {
+            KeyCode::Esc => return Action::CloseOverlay,
+            KeyCode::Enter => return Action::Confirm,
+            KeyCode::Backspace => return Action::FolderBackspace,
+            KeyCode::Char(c) => return Action::FolderChar(c),
+            KeyCode::Left => return Action::None,
+            KeyCode::Right => return Action::None,
+            KeyCode::Up => return Action::None,
+            KeyCode::Down => return Action::None,
+            _ => {}
+        }
+        return Action::None;
+    }
+
     // modal-specific handling first
     if overlay == Overlay::SettingsModal {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Char('t') | KeyCode::Char('T') => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
+    if overlay == Overlay::BarSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
             KeyCode::Up => Action::ModalUp,
             KeyCode::Down => Action::ModalDown,

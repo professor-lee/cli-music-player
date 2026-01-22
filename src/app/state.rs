@@ -4,6 +4,8 @@ use crate::render::cover_cache::CoverCache;
 use crate::render::cover_cache::CoverKey;
 use crate::render::cover_renderer::render_cover_ascii;
 use crate::ui::theme::Theme;
+use crate::audio::smoother::Ema;
+use crate::playback::remote_fetch::{FetchOptions, RemoteFetchRequest, RemoteFetchResult, TrackKey, start_remote_fetch_worker};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -218,6 +220,8 @@ pub enum Overlay {
     Playlist,
     FolderInput,
     SettingsModal,
+    BarSettingsModal,
+    AcoustIdModal,
     HelpModal,
     EqModal,
 }
@@ -254,6 +258,7 @@ pub struct AppState {
     // For MultiAlbum, this can differ from `playlist` (playback queue).
     pub playlist_view: Playlist,
     pub spectrum: SpectrumData,
+    pub spectrum_bar_smoother: Ema,
 
     pub cover_cache: RefCell<CoverCache>,
     pub cover_dominant_rgb_cache: RefCell<HashMap<u64, (u8, u8, u8)>>,
@@ -262,13 +267,20 @@ pub struct AppState {
     cover_render_rx: Receiver<CoverRenderResult>,
     cover_render_inflight: RefCell<HashSet<CoverKey>>,
 
+    remote_fetch_tx: Sender<RemoteFetchRequest>,
+    remote_fetch_rx: Receiver<RemoteFetchResult>,
+    remote_last_sent: Option<TrackKey>,
+
     pub overlay: Overlay,
     pub folder_input: FolderInput,
 
     pub settings_selected: usize,
+    pub bar_settings_selected: usize,
 
     pub eq: EqSettings,
     pub eq_selected: usize,
+
+    pub acoustid_input: String,
 
     // Folder that backs the *current playback queue* (contains audio files).
     pub local_folder: Option<PathBuf>,
@@ -351,6 +363,8 @@ impl AppState {
             }
         });
 
+        let (remote_fetch_tx, remote_fetch_rx) = start_remote_fetch_worker();
+
         Self {
             config,
             theme,
@@ -359,17 +373,24 @@ impl AppState {
             playlist: Playlist::default(),
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
+            spectrum_bar_smoother: Ema::new(0.35),
             cover_cache: RefCell::new(CoverCache::new(20)),
             cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
             cover_render_rx,
             cover_render_inflight: RefCell::new(HashSet::new()),
+            remote_fetch_tx,
+            remote_fetch_rx,
+            remote_last_sent: None,
             overlay: Overlay::None,
             folder_input: FolderInput::default(),
             settings_selected: 0,
+            bar_settings_selected: 0,
 
             eq: EqSettings::default(),
             eq_selected: 0,
+
+            acoustid_input: String::new(),
 
             local_folder: None,
             local_root_folder: None,
@@ -390,6 +411,64 @@ impl AppState {
             playlist_slide_target_x: 0,
             last_frame: Instant::now(),
         }
+    }
+
+    pub fn queue_remote_fetch(&mut self, path: Option<&std::path::Path>) {
+        if !self.config.lyrics_cover_fetch {
+            return;
+        }
+
+        let key = TrackKey::from_track(&self.player.track, path);
+        if self.remote_last_sent.as_ref() == Some(&key) {
+            return;
+        }
+        self.remote_last_sent = Some(key.clone());
+
+        let duration_secs = self.player.track.duration.as_secs();
+        let has_lyrics = self.player.track.lyrics.is_some();
+        let has_cover = self.player.track.cover.is_some();
+
+        let enable_fingerprint = self.config.audio_fingerprint && !self.config.acoustid_api_key.trim().is_empty();
+        let opts = FetchOptions {
+            enable_fetch: self.config.lyrics_cover_fetch,
+            download: self.config.lyrics_cover_download,
+            enable_fingerprint,
+            acoustid_api_key: if enable_fingerprint {
+                Some(self.config.acoustid_api_key.clone())
+            } else {
+                None
+            },
+        };
+
+        let req = RemoteFetchRequest {
+            key,
+            path: path.map(|p| p.to_path_buf()),
+            title: self.player.track.title.clone(),
+            artist: self.player.track.artist.clone(),
+            album: self.player.track.album.clone(),
+            duration_secs,
+            has_lyrics,
+            has_cover,
+            options: opts,
+        };
+
+        let _ = self.remote_fetch_tx.send(req);
+    }
+
+    pub fn reset_remote_fetch_state(&mut self) {
+        self.remote_last_sent = None;
+    }
+
+    pub fn drain_remote_fetch_results(&mut self) -> Vec<RemoteFetchResult> {
+        let mut out = Vec::new();
+        loop {
+            match self.remote_fetch_rx.try_recv() {
+                Ok(msg) => out.push(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        out
     }
 
     pub fn cover_dominant_rgb(&self, hash: u64, bytes: &[u8]) -> Option<(u8, u8, u8)> {

@@ -384,6 +384,18 @@ impl LocalPlayer {
         meta
     }
 
+    pub fn update_cached_metadata(&mut self, path: &Path, update: &crate::playback::remote_fetch::RemoteFetchResult) {
+        if let Some(m) = self.meta_cache.get_mut(path) {
+            update.apply_to(m);
+
+            // touch
+            if let Some(pos) = self.meta_order.iter().position(|p| p == path) {
+                let p = self.meta_order.remove(pos).unwrap_or_else(|| path.to_path_buf());
+                self.meta_order.push_back(p);
+            }
+        }
+    }
+
     pub fn set_eq(&mut self, eq: EqSettings) -> Result<()> {
         // 需求：自动应用时不能有明显延迟。
         // 这里改为更新共享参数，EqSource 会在运行时重算系数，无需 seek 重建。

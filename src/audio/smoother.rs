@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, Copy)]
 pub struct Ema {
     alpha: f32,
     state: [f32; 64],

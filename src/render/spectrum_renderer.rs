@@ -24,15 +24,39 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
     let bar_count = 64usize;
     let mut grid: Vec<Vec<char>> = vec![vec![' '; w]; bars_h];
 
+    let gap = app.config.bars_gap;
     for x in 0..w {
+        if gap && (x % 2 == 1) {
+            continue;
+        }
         let i = ((x as u32) * (bar_count as u32) / (w as u32)) as usize;
         let i = i.min(bar_count - 1);
         let val = bars[i].clamp(0.0, 1.0);
-        let bar_h = (val * bars_h as f32).round() as usize;
-        for y in 0..bar_h.min(bars_h) {
-            let row = bars_h - 1 - y;
-            let ch = density_char(y, bar_h.max(1));
-            grid[row][x] = ch;
+        if app.config.super_smooth_bar {
+            let fill = val * bars_h as f32;
+            let full = fill.floor().clamp(0.0, bars_h as f32) as usize;
+            let frac = (fill - full as f32).clamp(0.0, 1.0);
+
+            for y in 0..bars_h {
+                let row = bars_h - 1 - y;
+                let ch = if y < full {
+                    '█'
+                } else if y == full {
+                    smooth_char(frac)
+                } else {
+                    ' '
+                };
+                if ch != ' ' {
+                    grid[row][x] = ch;
+                }
+            }
+        } else {
+            let bar_h = (val * bars_h as f32).round() as usize;
+            for y in 0..bar_h.min(bars_h) {
+                let row = bars_h - 1 - y;
+                let ch = density_char(y, bar_h.max(1));
+                grid[row][x] = ch;
+            }
         }
     }
 
@@ -70,6 +94,27 @@ fn density_char(level: usize, height: usize) -> char {
         '▒'
     } else {
         '░'
+    }
+}
+
+fn smooth_char(frac: f32) -> char {
+    // Order: " ▂▃▄▅▆▇█" (low to high)
+    if frac <= 0.0 {
+        ' '
+    } else if frac < 1.0 / 7.0 {
+        '▂'
+    } else if frac < 2.0 / 7.0 {
+        '▃'
+    } else if frac < 3.0 / 7.0 {
+        '▄'
+    } else if frac < 4.0 / 7.0 {
+        '▅'
+    } else if frac < 5.0 / 7.0 {
+        '▆'
+    } else if frac < 6.0 / 7.0 {
+        '▇'
+    } else {
+        '█'
     }
 }
 

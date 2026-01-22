@@ -38,8 +38,11 @@ It supports local playback and system monitoring, and includes spectrum visualiz
 - System playback monitoring (MPRIS)
 - Playlist panel
 - Album cover rendering: ASCII art (default) or Kitty graphics (optional, if supported)
-- Settings modal (theme, transparent background, album border, UI FPS 30/60, visualization mode, Kitty graphics toggle, cover quality)
+- Settings modal (theme, transparent background, album border, visualization mode, Bar settings, Kitty graphics toggle, cover quality, lyrics/cover fetch & download, audio fingerprinting, AcoustID API key)
 - Lyrics display
+- Lyrics fetch: prefers embedded/local LRC (same-name .lrc and lrc/ folder), otherwise async LRCLIB
+- Cover fetch: prefers embedded/local cover (including cover/ folder), otherwise async MusicBrainz + Cover Art Archive
+- When metadata is missing, optional Chromaprint fingerprint + AcoustID lookup
 - Visualization: spectrum bars / oscilloscope (Braille overlay from stereo `cava` bars when available; falls back to internal FFT)
 
 <h2 align="center">Tech Stack</h2>
@@ -75,7 +78,7 @@ Install build dependencies (names may vary by distro):
 
 ```bash
 sudo apt update
-sudo apt install -y pkg-config libasound2-dev libdbus-1-dev
+sudo apt install -y pkg-config libasound2-dev libdbus-1-dev libchromaprint-dev
 ```
 
 ### Run
@@ -189,6 +192,23 @@ Kitty-related settings (in `config/default.toml`):
 
 - `kitty_graphics`: enable Kitty graphics protocol rendering (default: `false`)
 - `kitty_cover_scale_percent`: cover quality in percent (default: `50`; `100` means no downscale)
+
+Bars settings (in `config/default.toml`, bars mode only):
+
+- `super_smooth_bar`: finer height glyphs (default: `false`)
+- `bars_gap`: insert a blank column between bars (default: `false`)
+
+Lyrics/cover and fingerprint settings (in `config/default.toml`):
+
+- `lyrics_cover_fetch`: enable async lyrics/cover fetch (default: `false`)
+- `lyrics_cover_download`: save fetched lyrics/cover locally (default: `false`)
+- `audio_fingerprint`: enable audio fingerprinting (default: `false`, requires AcoustID API key)
+- `acoustid_api_key`: AcoustID API key (set via Settings modal)
+
+Downloaded storage paths (when enabled):
+
+- Lyrics: lrc/ folder next to the audio file, same filename (.lrc)
+- Cover: cover/ folder next to the audio file, same filename (.jpg/.png)
 
 Default locations (Linux):
 
