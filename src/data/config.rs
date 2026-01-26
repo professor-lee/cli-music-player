@@ -37,6 +37,15 @@ pub struct Config {
     #[serde(default)]
     pub bars_gap: bool,
 
+    #[serde(default = "default_bar_number")]
+    pub bar_number: BarNumber,
+
+    #[serde(default = "default_bar_channels")]
+    pub bar_channels: BarChannels,
+
+    #[serde(default)]
+    pub bar_channel_reverse: bool,
+
     #[serde(default)]
     pub lyrics_cover_fetch: bool,
 
@@ -48,6 +57,12 @@ pub struct Config {
 
     #[serde(default)]
     pub acoustid_api_key: String,
+
+    #[serde(default)]
+    pub resume_last_position: bool,
+
+    #[serde(default, rename = "default-opening-folder")]
+    pub default_opening_folder: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +70,31 @@ pub struct Config {
 pub enum VisualizeMode {
     Bars,
     Oscilloscope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarChannels {
+    Stereo,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BarNumber {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "16")]
+    N16,
+    #[serde(rename = "32")]
+    N32,
+    #[serde(rename = "48")]
+    N48,
+    #[serde(rename = "64")]
+    N64,
+    #[serde(rename = "80")]
+    N80,
+    #[serde(rename = "96")]
+    N96,
 }
 
 fn default_visualize() -> VisualizeMode {
@@ -70,7 +110,15 @@ fn default_eq_bands_db() -> [f32; crate::app::state::EQ_BANDS] {
 }
 
 fn default_kitty_cover_scale_percent() -> u8 {
-    50
+    100
+}
+
+fn default_bar_number() -> BarNumber {
+    BarNumber::Auto
+}
+
+fn default_bar_channels() -> BarChannels {
+    BarChannels::Mono
 }
 
 impl Default for Config {
@@ -78,7 +126,7 @@ impl Default for Config {
         Self {
             theme: "mocha".to_string(),
             ui_fps: 60,
-            spectrum_hz: 30,
+            spectrum_hz: 60,
             mpris_poll_ms: 100,
             visualize: default_visualize(),
             eq_bands_db: default_eq_bands_db(),
@@ -88,10 +136,15 @@ impl Default for Config {
             kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
+            bar_number: default_bar_number(),
+            bar_channels: default_bar_channels(),
+            bar_channel_reverse: false,
             lyrics_cover_fetch: false,
             lyrics_cover_download: false,
             audio_fingerprint: false,
             acoustid_api_key: String::new(),
+            resume_last_position: false,
+            default_opening_folder: String::new(),
         }
     }
 }
@@ -105,7 +158,29 @@ impl Config {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
-        Ok(toml::from_str(&raw).unwrap_or_default())
+        let cfg: Config = toml::from_str(&raw).unwrap_or_default();
+
+        // Ensure spectrum rate stays in sync with UI fps (one-time sync on load).
+        let mut cfg = cfg;
+        if cfg.spectrum_hz != cfg.ui_fps {
+            let synced = cfg.spectrum_hz.max(cfg.ui_fps);
+            cfg.spectrum_hz = synced;
+            cfg.ui_fps = synced;
+        }
+
+        // Auto-migrate missing fields into the config file.
+        if !raw.contains("default-opening-folder")
+            || !raw.contains("resume_last_position")
+            || !raw.contains("bar_number")
+            || !raw.contains("bar_channels")
+            || !raw.contains("bar_channel_reverse")
+            || !raw.contains("spectrum_hz")
+            || cfg.spectrum_hz != cfg.ui_fps
+        {
+            let _ = cfg.save();
+        }
+
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {

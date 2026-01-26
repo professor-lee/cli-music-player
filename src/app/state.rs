@@ -163,30 +163,27 @@ impl Default for TrackMetadata {
 
 #[derive(Debug, Clone)]
 pub struct SpectrumData {
-    pub bars: [f32; 64],
+    pub bars: Vec<f32>,
+    pub bars_left: Vec<f32>,
+    pub bars_right: Vec<f32>,
     pub stereo_left: [f32; 64],
     pub stereo_right: [f32; 64],
 
     // Oscilloscope synthesis state (kept across frames for stability).
     pub osc_phase_left: [f32; 64],
     pub osc_phase_right: [f32; 64],
-
-    pub samples: Vec<f32>,
-    pub sample_rate: u32,
-    pub fft_size: usize,
 }
 
 impl Default for SpectrumData {
     fn default() -> Self {
         Self {
-            bars: [0.0; 64],
+            bars: vec![0.0; 64],
+            bars_left: vec![0.0; 64],
+            bars_right: vec![0.0; 64],
             stereo_left: [0.0; 64],
             stereo_right: [0.0; 64],
             osc_phase_left: [0.0; 64],
             osc_phase_right: [0.0; 64],
-            samples: Vec::new(),
-            sample_rate: 44100,
-            fft_size: 2048,
         }
     }
 }
@@ -221,6 +218,8 @@ pub enum Overlay {
     FolderInput,
     SettingsModal,
     BarSettingsModal,
+    LocalAudioSettingsModal,
+    AboutModal,
     AcoustIdModal,
     HelpModal,
     EqModal,
@@ -276,6 +275,7 @@ pub struct AppState {
 
     pub settings_selected: usize,
     pub bar_settings_selected: usize,
+    pub local_audio_settings_selected: usize,
 
     pub eq: EqSettings,
     pub eq_selected: usize,
@@ -373,7 +373,7 @@ impl AppState {
             playlist: Playlist::default(),
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
-            spectrum_bar_smoother: Ema::new(0.35),
+            spectrum_bar_smoother: Ema::new(0.35, 64),
             cover_cache: RefCell::new(CoverCache::new(20)),
             cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
@@ -386,6 +386,7 @@ impl AppState {
             folder_input: FolderInput::default(),
             settings_selected: 0,
             bar_settings_selected: 0,
+            local_audio_settings_selected: 0,
 
             eq: EqSettings::default(),
             eq_selected: 0,

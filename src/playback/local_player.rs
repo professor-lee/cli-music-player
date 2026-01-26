@@ -59,6 +59,12 @@ struct OrderFile {
     #[serde(default)]
     last_album: Option<String>,
 
+    #[serde(default)]
+    last_position_song: Option<String>,
+
+    #[serde(default)]
+    last_position_sec: Option<u64>,
+
     // Cached rendered cover ASCII, keyed by "<hash>:<width>x<height>".
     // Stored here to speed up subsequent loads without re-decoding/resizing images.
     #[serde(default)]
@@ -201,6 +207,22 @@ pub fn write_last_album(root: &Path, album_folder: &Path) -> Result<()> {
     let rel = album_folder.strip_prefix(root).unwrap_or(album_folder);
     of.last_album = Some(rel.to_string_lossy().replace('\\', "/"));
     write_order_file_struct(root, &of)
+}
+
+pub fn write_last_position(folder: &Path, song_path: &Path, position: Duration) -> Result<()> {
+    let mut of = read_order_file(folder).unwrap_or_default();
+    of.last_position_song = Some(order_key(folder, song_path));
+    of.last_position_sec = Some(position.as_secs());
+    write_order_file_struct(folder, &of)
+}
+
+pub fn read_last_position_for_song(folder: &Path, song_path: &Path) -> Option<u64> {
+    let of = read_order_file(folder)?;
+    let key = order_key(folder, song_path);
+    if of.last_position_song.as_deref() == Some(key.as_str()) {
+        return of.last_position_sec;
+    }
+    None
 }
 
 fn apply_last_opened_song(folder: &Path, playlist: &mut Playlist, of: &OrderFile) {

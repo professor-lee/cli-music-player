@@ -38,19 +38,19 @@ It supports local playback and system monitoring, and includes spectrum visualiz
 - System playback monitoring (MPRIS)
 - Playlist panel
 - Album cover rendering: ASCII art (default) or Kitty graphics (optional, if supported)
-- Settings modal (theme, transparent background, album border, visualization mode, Bar settings, Kitty graphics toggle, cover quality, lyrics/cover fetch & download, audio fingerprinting, AcoustID API key)
+- Settings modal (theme, transparent background, album border, visualization mode, Bar settings, Kitty graphics toggle, cover quality, Local audio settings for lyrics/cover fetch & download, audio fingerprinting, AcoustID API key, resume last position, About)
 - Lyrics display
 - Lyrics fetch: prefers embedded/local LRC (same-name .lrc and lrc/ folder), otherwise async LRCLIB
 - Cover fetch: prefers embedded/local cover (including cover/ folder), otherwise async MusicBrainz + Cover Art Archive
 - When metadata is missing, optional Chromaprint fingerprint + AcoustID lookup
-- Visualization: spectrum bars / oscilloscope (Braille overlay from stereo `cava` bars when available; falls back to internal FFT)
+- Visualization: spectrum bars / oscilloscope (Braille overlay from stereo `cava` bars)
 
 <h2 align="center">Tech Stack</h2>
 
 - Rust 2021
 - TUI: ratatui + crossterm
 - Playback: rodio (local), MPRIS (system)
-- Visualization: `cava` (external bars) or internal FFT fallback
+- Visualization: `cava` (external bars)
 
 <h2 align="center">Development Setup</h2>
 
@@ -187,18 +187,30 @@ cargo build --release
 
 <h2 align="center">Configuration</h2>
 
-- `config/default.toml`: UI/spectrum/MPRIS + EQ settings
+- `config/default.toml`: UI/spectrum/MPRIS + EQ settings (spectrum rate is kept in sync with `ui_fps`)
 - `themes/*.toml`: theme definitions
 
 Kitty-related settings (in `config/default.toml`):
 
 - `kitty_graphics`: enable Kitty graphics protocol rendering (default: `false`)
-- `kitty_cover_scale_percent`: cover quality in percent (default: `50`; `100` means no downscale)
+- `kitty_cover_scale_percent`: cover quality in percent (default: `100`; `100` means no downscale)
 
 Bars settings (in `config/default.toml`, bars mode only):
 
 - `super_smooth_bar`: finer height glyphs (default: `false`)
-- `bars_gap`: insert a blank column between bars (default: `false`)
+- `bars_gap`: insert gaps between bars (default: `false`)
+- `bar_number`: number of bars per side (`auto`, `16`, `32`, `48`, `64`, `80`, `96`)
+- `bar_channels`: `stereo` (mirrored from center using mono data) or `mono` (low-to-high left→right)
+- `bar_channel_reverse`: reverse channel mapping (mono flips left↔right; stereo shows high at center, low at edges)
+
+Bar layout notes:
+- When gaps are on, each gap is at least half a bar width and the bar count is clamped to fit.
+- When gaps are off, bars use at least 2 columns per bar (max bars ≈ half the available width).
+- Bar heights use a nonlinear curve to avoid saturating the display too quickly.
+
+Startup settings (in `config/default.toml`):
+
+- `default-opening-folder`: auto-open a local folder on launch (default: `""`; if missing/invalid, it will be cleared)
 
 Lyrics/cover and fingerprint settings (in `config/default.toml`):
 
@@ -206,6 +218,7 @@ Lyrics/cover and fingerprint settings (in `config/default.toml`):
 - `lyrics_cover_download`: save fetched lyrics/cover locally (default: `false`)
 - `audio_fingerprint`: enable audio fingerprinting (default: `false`, requires AcoustID API key)
 - `acoustid_api_key`: AcoustID API key (set via Settings modal)
+- `resume_last_position`: resume last local track position on launch (default: `false`; stored per folder in `.order.toml`, seconds precision)
 
 Downloaded storage paths (when enabled):
 

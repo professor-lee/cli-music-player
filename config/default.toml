@@ -1,16 +1,21 @@
 theme = "frappe"
 ui_fps = 60
-spectrum_hz = 30
+spectrum_hz = 60
 mpris_poll_ms = 100
 visualize = "bars"
 transparent_background = true
 album_border = false
 kitty_graphics = false
-kitty_cover_scale_percent = 50
+kitty_cover_scale_percent = 100
 super_smooth_bar = false
 bars_gap = false
+bar_number = "auto"
+bar_channels = "mono"
+bar_channel_reverse = false
 
 lyrics_cover_fetch = false
 lyrics_cover_download = false
 audio_fingerprint = false
 acoustid_api_key = ""
+resume_last_position = false
+default-opening-folder = ""

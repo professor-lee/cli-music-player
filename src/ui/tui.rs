@@ -35,6 +35,8 @@ pub struct UiLayout {
     pub playlist_list_inner: Rect,
 
     pub playlist_cover_image: Rect,
+
+    pub spectrum_rect: Rect,
 }
 
 struct KittyRenderRequest {
@@ -173,6 +175,22 @@ impl Tui {
                 .constraints([Constraint::Length(lyric_h), Constraint::Min(1)])
                 .split(cols[1]);
 
+            // Mirror visual panel inner layout for auto bar count.
+            let outer = Rect {
+                x: rows[0].x,
+                y: rows[0].y,
+                width: rows[0].width,
+                height: rows[0].height.saturating_add(rows[1].height),
+            };
+            let inner = outer.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let lyric_h_inner = rows[0].height.saturating_sub(2).min(inner.height);
+            layout_out.spectrum_rect = Rect {
+                x: inner.x,
+                y: inner.y + lyric_h_inner,
+                width: inner.width,
+                height: inner.height.saturating_sub(lyric_h_inner),
+            };
+
             let info_l = info_panel::layout(cols[0]);
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
@@ -278,6 +296,8 @@ impl Tui {
             match app.overlay {
                 Overlay::SettingsModal => render_settings_modal(f, size, app),
                 Overlay::BarSettingsModal => render_bar_settings_modal(f, size, app),
+                Overlay::LocalAudioSettingsModal => render_local_audio_settings_modal(f, size, app),
+                Overlay::AboutModal => render_about_modal(f, size, app),
                 Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app),
                 Overlay::EqModal => render_eq_modal(f, size, app),
@@ -308,7 +328,14 @@ impl Tui {
 
         // While Settings modal is open, do NOT refresh/re-transmit covers; keep using
         // the last applied quality so the cover doesn't constantly churn while tweaking.
-        let settings_open = matches!(app.overlay, Overlay::SettingsModal | Overlay::AcoustIdModal | Overlay::BarSettingsModal);
+        let settings_open = matches!(
+            app.overlay,
+            Overlay::SettingsModal
+                | Overlay::AcoustIdModal
+                | Overlay::BarSettingsModal
+                | Overlay::LocalAudioSettingsModal
+                | Overlay::AboutModal
+        );
 
         // 0 is used as an internal sentinel for "not initialized yet".
         if self.kitty_last_cover_quality == 0 {
@@ -514,7 +541,7 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
 
 fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     // Keep enough height to show header + all items.
-    let area = centered_rect(size, 62, 16);
+    let area = centered_rect(size, 62, 15);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -555,25 +582,8 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         }
     );
 
-    let lyrics_fetch_label = format!(
-        "Lyrics/Cover fetch: {}",
-        if app.config.lyrics_cover_fetch { "On" } else { "Off" }
-    );
-    let lyrics_download_label = format!(
-        "Lyrics/Cover download: {}",
-        if app.config.lyrics_cover_download { "On" } else { "Off" }
-    );
-    let fingerprint_label = if app.config.acoustid_api_key.trim().is_empty() {
-        "Audio fingerprint: Off (API key required)".to_string()
-    } else {
-        format!("Audio fingerprint: {}", if app.config.audio_fingerprint { "On" } else { "Off" })
-    };
-    let acoustid_label = format!(
-        "AcoustID API: {}",
-        if app.config.acoustid_api_key.trim().is_empty() { "Not set" } else { "Set" }
-    );
-
     let bar_setting_label = "Bar settings...".to_string();
+    let local_audio_setting_label = "Local audio...".to_string();
 
     let items = [
         format!("Theme: {}", app.theme.name.as_label()),
@@ -586,10 +596,8 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         bar_setting_label,
         kitty_label,
         cover_compress_label,
-        lyrics_fetch_label,
-        lyrics_download_label,
-        fingerprint_label,
-        acoustid_label,
+        local_audio_setting_label,
+        "About".to_string(),
     ];
 
     for (idx, text) in items.iter().enumerate() {
@@ -597,7 +605,6 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
             4 => app.config.visualize != crate::data::config::VisualizeMode::Bars,
             5 => !app.kitty_graphics_supported,
             6 => !app.kitty_graphics_supported || !app.config.kitty_graphics,
-            9 => app.config.acoustid_api_key.trim().is_empty(),
             _ => false,
         };
 
@@ -615,6 +622,9 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         } else {
             Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())
         };
+        if idx == items.len().saturating_sub(1) {
+            lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
+        }
         lines.push(Line::styled(format!("  {}", text), style));
     }
 
@@ -655,7 +665,7 @@ fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
 }
 
 fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    let area = centered_rect(size, 50, 10);
+    let area = centered_rect(size, 50, 12);
     f.render_widget(ratatui::widgets::Clear, area);
 
     let block = Block::default()
@@ -674,6 +684,27 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
     ));
     lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
 
+    let bar_number_label = match app.config.bar_number {
+        crate::data::config::BarNumber::Auto => "Bar number: Auto".to_string(),
+        crate::data::config::BarNumber::N16 => "Bar number: 16".to_string(),
+        crate::data::config::BarNumber::N32 => "Bar number: 32".to_string(),
+        crate::data::config::BarNumber::N48 => "Bar number: 48".to_string(),
+        crate::data::config::BarNumber::N64 => "Bar number: 64".to_string(),
+        crate::data::config::BarNumber::N80 => "Bar number: 80".to_string(),
+        crate::data::config::BarNumber::N96 => "Bar number: 96".to_string(),
+    };
+    let channels_label = format!(
+        "Channels: {}",
+        match app.config.bar_channels {
+            crate::data::config::BarChannels::Stereo => "Stereo",
+            crate::data::config::BarChannels::Mono => "Mono",
+        }
+    );
+    let reverse_label = format!(
+        "Channel reverse: {}",
+        if app.config.bar_channel_reverse { "On" } else { "Off" }
+    );
+
     let items = [
         format!(
             "Super smooth bar: {}",
@@ -683,6 +714,9 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
             "Bars gap: {}",
             if app.config.bars_gap { "On" } else { "Off" }
         ),
+        bar_number_label,
+        channels_label,
+        reverse_label,
     ];
 
     for (idx, text) in items.iter().enumerate() {
@@ -701,6 +735,298 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
         .style(Style::default().bg(app.theme.color_surface()))
         .wrap(Wrap { trim: true });
     f.render_widget(p, inner);
+}
+
+fn render_local_audio_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+    let area = centered_rect(size, 60, 12);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::ui::borders::SOLID_BORDER)
+        .title("Local Audio")
+        .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()));
+    f.render_widget(block, area);
+
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(
+        "Up/Down Select  Left/Right Change  Enter Open  Esc Close",
+        Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()),
+    ));
+    lines.push(Line::styled("", Style::default().bg(app.theme.color_surface())));
+
+    let lyrics_fetch_label = format!(
+        "Lyrics/Cover fetch: {}",
+        if app.config.lyrics_cover_fetch { "On" } else { "Off" }
+    );
+    let lyrics_download_label = format!(
+        "Lyrics/Cover download: {}",
+        if app.config.lyrics_cover_download { "On" } else { "Off" }
+    );
+    let fingerprint_label = if app.config.acoustid_api_key.trim().is_empty() {
+        "Audio fingerprint: Off (API key required)".to_string()
+    } else {
+        format!("Audio fingerprint: {}", if app.config.audio_fingerprint { "On" } else { "Off" })
+    };
+    let acoustid_label = format!(
+        "AcoustID API: {}",
+        if app.config.acoustid_api_key.trim().is_empty() { "Not set" } else { "Set" }
+    );
+    let resume_label = format!(
+        "Resume last position: {}",
+        if app.config.resume_last_position { "On" } else { "Off" }
+    );
+
+    let items = [
+        lyrics_fetch_label,
+        lyrics_download_label,
+        fingerprint_label,
+        acoustid_label,
+        resume_label,
+    ];
+
+    for (idx, text) in items.iter().enumerate() {
+        let disabled = match idx {
+            2 => app.config.acoustid_api_key.trim().is_empty(),
+            _ => false,
+        };
+
+        let style = if idx == app.local_audio_settings_selected {
+            if disabled {
+                Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())
+            } else {
+                Style::default()
+                    .fg(app.theme.color_base())
+                    .bg(app.theme.color_accent())
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if disabled {
+            Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())
+        } else {
+            Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())
+        };
+        lines.push(Line::styled(format!("  {}", text), style));
+    }
+
+    let p = Paragraph::new(lines)
+        .style(Style::default().bg(app.theme.color_surface()))
+        .wrap(Wrap { trim: true });
+    f.render_widget(p, inner);
+}
+
+fn render_about_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+    let area = centered_rect(size, 70, 22);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::ui::borders::SOLID_BORDER)
+        .title("About")
+        .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()));
+    f.render_widget(block, area);
+
+    let inner = area.inner(&ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(inner);
+
+    render_about_braille(f, chunks[0], app);
+    render_about_text(f, chunks[1], app);
+
+    let info = crate::data::about::about_info();
+    let version = format!("v{}", info.version);
+    let y = area.y + area.height.saturating_sub(1);
+    let x = area.x + (area.width.saturating_sub(version.len() as u16)) / 2;
+    let version_area = Rect {
+        x,
+        y,
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(version)
+            .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())),
+        version_area,
+    );
+}
+
+fn render_about_braille(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let lines = about_braille_lines(area.width as usize, area.height as usize);
+    let p = Paragraph::new(lines)
+        .style(Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface()));
+    f.render_widget(p, area);
+}
+
+fn render_about_text(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let info = crate::data::about::about_info();
+
+    let max_width = area.width as usize;
+    if max_width == 0 {
+        return;
+    }
+
+    let mut rendered: Vec<String> = Vec::new();
+    for (k, v) in &info.links {
+        let line = if k.eq_ignore_ascii_case("github_url") {
+            v.to_string()
+        } else {
+            format!("{}: {}", k, v)
+        };
+        rendered.extend(wrap_text(&line, max_width));
+    }
+
+    let desc_lines: Vec<String> = wrap_text(&info.description, max_width);
+    if !desc_lines.is_empty() {
+        rendered.push(String::new());
+        rendered.extend(desc_lines);
+    }
+
+    let max_line_len = rendered
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(max_width);
+    let block_h = rendered.len() as u16;
+    let block_w = max_line_len.max(1) as u16;
+    let offset_x = (area.width.saturating_sub(block_w)) / 2;
+    let offset_y = if block_h <= area.height {
+        (area.height.saturating_sub(block_h)) / 2
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = rendered
+        .into_iter()
+        .map(|l| Line::styled(l, Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface())))
+        .collect();
+    let p = Paragraph::new(lines)
+        .style(Style::default().bg(app.theme.color_surface()))
+        .wrap(Wrap { trim: false });
+    let text_area = Rect {
+        x: area.x + offset_x,
+        y: area.y + offset_y,
+        width: block_w,
+        height: area.height,
+    };
+    f.render_widget(p, text_area);
+}
+
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    for ch in s.chars() {
+        if buf.chars().count() >= width {
+            out.push(buf);
+            buf = String::new();
+        }
+        buf.push(ch);
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+fn about_braille_lines(width: usize, height: usize) -> Vec<Line<'static>> {
+    use image::imageops::FilterType;
+
+    let bytes = crate::data::about::about_image_bytes();
+    let img = match image::load_from_memory(bytes) {
+        Ok(v) => v.to_rgba8(),
+        Err(_) => {
+            let blank = " ".repeat(width);
+            return (0..height).map(|_| Line::from(blank.clone())).collect();
+        }
+    };
+
+    let src_w = img.width().max(1);
+    let src_h = img.height().max(1);
+    let target_px_w = (width as u32).saturating_mul(2).max(1);
+    let target_px_h = (height as u32).saturating_mul(4).max(1);
+
+    let scale = (target_px_w as f32 / src_w as f32)
+        .min(target_px_h as f32 / src_h as f32)
+        .max(0.01);
+    let new_w = ((src_w as f32) * scale).round().max(1.0) as u32;
+    let new_h = ((src_h as f32) * scale).round().max(1.0) as u32;
+
+    let resized = image::imageops::resize(&img, new_w, new_h, FilterType::Nearest);
+    let offset_x_cells = ((width as i32) - ((new_w as i32 + 1) / 2)).max(0) as usize / 2;
+    let offset_y_cells = ((height as i32) - ((new_h as i32 + 3) / 4)).max(0) as usize / 2;
+
+    let mut grid: Vec<Vec<char>> = vec![vec![' '; width]; height];
+    let cells_w = ((new_w + 1) / 2) as usize;
+    let cells_h = ((new_h + 3) / 4) as usize;
+
+    for cy in 0..cells_h {
+        for cx in 0..cells_w {
+            let mut bits = 0u8;
+            for py in 0..4 {
+                for px in 0..2 {
+                    let x = (cx as u32) * 2 + px;
+                    let y = (cy as u32) * 4 + py;
+                    if x >= new_w || y >= new_h {
+                        continue;
+                    }
+                    let p = resized.get_pixel(x, y).0;
+                    let a = p[3] as u16;
+                    if a == 0 {
+                        continue;
+                    }
+                    let lum = (p[0] as u16 + p[1] as u16 + p[2] as u16) / 3;
+                    if lum < 128 {
+                        bits |= braille_bit(px as usize, py as usize);
+                    }
+                }
+            }
+            if bits != 0 {
+                let gx = offset_x_cells + cx;
+                let gy = offset_y_cells + cy;
+                if gx < width && gy < height {
+                    grid[gy][gx] = braille_from_bits(bits);
+                }
+            }
+        }
+    }
+
+    grid.into_iter()
+        .map(|row| Line::from(row.into_iter().collect::<String>()))
+        .collect()
+}
+
+fn braille_bit(dx: usize, dy: usize) -> u8 {
+    match (dx, dy) {
+        (0, 0) => 0x01,
+        (0, 1) => 0x02,
+        (0, 2) => 0x04,
+        (0, 3) => 0x40,
+        (1, 0) => 0x08,
+        (1, 1) => 0x10,
+        (1, 2) => 0x20,
+        (1, 3) => 0x80,
+        _ => 0,
+    }
+}
+
+fn braille_from_bits(bits: u8) -> char {
+    std::char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
 }
 
 fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {

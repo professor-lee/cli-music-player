@@ -8,9 +8,25 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CavaChannels {
+    Stereo,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CavaConfig {
+    pub framerate_hz: u32,
+    pub bars: usize,
+    pub channels: CavaChannels,
+    pub reverse: bool,
+}
+
 pub struct CavaRunner {
-    left: Arc<Mutex<[f32; 64]>>,
-    right: Arc<Mutex<[f32; 64]>>,
+    left: Arc<Mutex<Vec<f32>>>,
+    right: Arc<Mutex<Vec<f32>>>,
+    channels: CavaChannels,
     child: Child,
     _reader: thread::JoinHandle<()>,
     cfg_path: String,
@@ -18,16 +34,26 @@ pub struct CavaRunner {
 }
 
 impl CavaRunner {
-    pub fn start(framerate_hz: u32) -> Result<Self> {
+    pub fn start(cfg: CavaConfig) -> Result<Self> {
         // Minimal config we generate ourselves (do not copy upstream example config).
-        // Uses raw ascii output to stdout, 64 bars per channel.
+        // Uses raw ascii output to stdout.
         // We request stereo; depending on cava version/backend, it may emit:
         // - 2 lines per frame (one per channel, each 64 values), OR
         // - 1 line per frame containing 128 values.
-        let framerate_hz = framerate_hz.clamp(10, 120);
+        let framerate_hz = cfg.framerate_hz.clamp(10, 120);
+        let bars = cfg.bars.clamp(8, 96);
+        let channels = cfg.channels;
+        let channels_str = match channels {
+            CavaChannels::Stereo => "stereo",
+            CavaChannels::Mono => "mono",
+        };
+        let reverse = if cfg.reverse { 1 } else { 0 };
         let cfg = format!(
-            "[general]\nframerate = {fr}\nbars = 64\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend (pipewire/pulse/etc).\n\n[output]\nmethod = raw\nchannels = stereo\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
-            fr = framerate_hz
+            "[general]\nframerate = {fr}\nbars = {bars}\nreverse = {reverse}\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend (pipewire/pulse/etc).\n\n[output]\nmethod = raw\nchannels = {channels}\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
+            fr = framerate_hz,
+            bars = bars,
+            reverse = reverse,
+            channels = channels_str
         );
 
         let cfg_path = temp_cfg_path();
@@ -48,8 +74,8 @@ impl CavaRunner {
             .take()
             .context("failed to capture cava stdout")?;
 
-        let left: Arc<Mutex<[f32; 64]>> = Arc::new(Mutex::new([0.0; 64]));
-        let right: Arc<Mutex<[f32; 64]>> = Arc::new(Mutex::new([0.0; 64]));
+        let left: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; bars]));
+        let right: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; bars]));
         let left_cloned = Arc::clone(&left);
         let right_cloned = Arc::clone(&right);
 
@@ -62,31 +88,41 @@ impl CavaRunner {
                 match br.read_line(&mut line) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        let frames = parse_frames_ascii(&line);
-                        match frames.len() {
-                            1 => {
-                                let frame = frames[0];
-                                if next_is_left {
+                        let frames = parse_frames_ascii(&line, bars);
+                        match channels {
+                            CavaChannels::Mono => {
+                                if let Some(frame) = frames.get(0) {
                                     let mut g = left_cloned.lock().unwrap();
-                                    *g = frame;
-                                } else {
-                                    let mut g = right_cloned.lock().unwrap();
-                                    *g = frame;
+                                    *g = frame.clone();
+                                    let mut r = right_cloned.lock().unwrap();
+                                    *r = frame.clone();
                                 }
-                                next_is_left = !next_is_left;
                             }
-                            2 => {
-                                {
-                                    let mut g = left_cloned.lock().unwrap();
-                                    *g = frames[0];
+                            CavaChannels::Stereo => match frames.len() {
+                                1 => {
+                                    let frame = frames[0].clone();
+                                    if next_is_left {
+                                        let mut g = left_cloned.lock().unwrap();
+                                        *g = frame;
+                                    } else {
+                                        let mut g = right_cloned.lock().unwrap();
+                                        *g = frame;
+                                    }
+                                    next_is_left = !next_is_left;
                                 }
-                                {
-                                    let mut g = right_cloned.lock().unwrap();
-                                    *g = frames[1];
+                                2 => {
+                                    {
+                                        let mut g = left_cloned.lock().unwrap();
+                                        *g = frames[0].clone();
+                                    }
+                                    {
+                                        let mut g = right_cloned.lock().unwrap();
+                                        *g = frames[1].clone();
+                                    }
+                                    next_is_left = true;
                                 }
-                                next_is_left = true;
-                            }
-                            _ => {}
+                                _ => {}
+                            },
                         }
                     }
                     Err(_) => break,
@@ -97,6 +133,7 @@ impl CavaRunner {
         Ok(Self {
             left,
             right,
+            channels,
             child,
             _reader: reader,
             cfg_path,
@@ -104,18 +141,21 @@ impl CavaRunner {
         })
     }
 
-    pub fn latest_bars(&self) -> [f32; 64] {
-        let l = *self.left.lock().unwrap();
-        let r = *self.right.lock().unwrap();
-        let mut out = [0.0f32; 64];
-        for i in 0..64 {
+    pub fn latest_bars(&self) -> Vec<f32> {
+        let l = self.left.lock().unwrap().clone();
+        let r = self.right.lock().unwrap().clone();
+        if self.channels == CavaChannels::Mono {
+            return l;
+        }
+        let mut out = vec![0.0f32; l.len()];
+        for i in 0..l.len().min(r.len()) {
             out[i] = ((l[i] + r[i]) * 0.5).clamp(0.0, 1.0);
         }
         out
     }
 
-    pub fn latest_stereo_bars(&self) -> ([f32; 64], [f32; 64]) {
-        (*self.left.lock().unwrap(), *self.right.lock().unwrap())
+    pub fn latest_stereo_bars(&self) -> (Vec<f32>, Vec<f32>) {
+        (self.left.lock().unwrap().clone(), self.right.lock().unwrap().clone())
     }
 }
 
@@ -208,9 +248,9 @@ impl Drop for CavaRunner {
     }
 }
 
-fn parse_frames_ascii(s: &str) -> Vec<[f32; 64]> {
+fn parse_frames_ascii(s: &str, bars: usize) -> Vec<Vec<f32>> {
     // ascii_max_range=1000, bar_delimiter=';'
-    // Can be 64 values (one channel) or 128 values (two channels) on a single line.
+    // Can be N values (one channel) or 2N values (two channels) on a single line.
     let mut vals: Vec<f32> = Vec::new();
     for part in s.split(|c: char| c == ';' || c == '\n' || c == '\r' || c == ' ' || c == '\t') {
         if part.is_empty() {
@@ -221,22 +261,22 @@ fn parse_frames_ascii(s: &str) -> Vec<[f32; 64]> {
         }
     }
 
-    if vals.len() == 64 {
-        let mut out = [0.0f32; 64];
-        out.copy_from_slice(&vals);
-        return vec![out];
+    if bars == 0 {
+        return Vec::new();
     }
 
-    if vals.len() == 128 {
-        let mut l = [0.0f32; 64];
-        let mut r = [0.0f32; 64];
-        // Most commonly: left block then right block.
-        l.copy_from_slice(&vals[0..64]);
-        r.copy_from_slice(&vals[64..128]);
-        return vec![l, r];
+    let mut out: Vec<Vec<f32>> = Vec::new();
+    let mut idx = 0usize;
+    while idx + bars <= vals.len() {
+        let mut frame = vec![0.0f32; bars];
+        for i in 0..bars {
+            frame[i] = vals[idx + i];
+        }
+        out.push(frame);
+        idx += bars;
     }
 
-    Vec::new()
+    out
 }
 
 fn temp_cfg_path() -> String {

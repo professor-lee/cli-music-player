@@ -38,19 +38,19 @@
 - 系统播放监控（MPRIS）
 - 播放列表侧边栏
 - 专辑封面渲染：默认 ASCII 字符封面；如终端支持可启用 Kitty 图片封面
-- Settings 弹窗（主题、透明背景、专辑边框、可视化模式、Bar 设置、Kitty 开关、封面质量、歌词/封面获取与下载、音频指纹识别、AcoustID API Key）
+- Settings 弹窗（主题、透明背景、专辑边框、可视化模式、Bar 设置、Kitty 开关、封面质量、本地音频设置：歌词/封面获取与下载、音频指纹识别、AcoustID API Key、续播位置、About）
 - 歌词显示
 - 歌词获取：优先读取内嵌或本地 LRC（含同名 .lrc 与 lrc/ 目录），无则异步调用 LRCLIB
 - 封面获取：优先读取内嵌或本地封面（含 cover/ 目录），无则异步使用 MusicBrainz + Cover Art Archive
 - 无元数据时可选用 Chromaprint 生成指纹，通过 AcoustID 补全信息
-- 可视化：频谱 Bars / 示波器（Oscilloscope，Braille 点阵叠加左右声道；优先使用 `cava` 数值，不可用时回退内部 FFT）
+- 可视化：频谱 Bars / 示波器（Oscilloscope，Braille 点阵叠加左右声道；使用 `cava` 数值）
 
 <h2 align="center">技术栈</h2>
 
 - Rust 2021
 - TUI：ratatui + crossterm
 - 播放：rodio（本地）、MPRIS（系统）
-- 可视化：`cava`（外部 bars）或内部 FFT 回退
+- 可视化：`cava`（外部 bars）
 
 <h2 align="center">开发与运行</h2>
 
@@ -187,18 +187,30 @@ cargo build --release
 
 <h2 align="center">配置</h2>
 
-- `config/default.toml`：UI/频谱/MPRIS + 均衡器（EQ）等配置
+- `config/default.toml`：UI/频谱/MPRIS + 均衡器（EQ）等配置（频谱刷新率会与 `ui_fps` 同步）
 - `themes/*.toml`：主题定义
 
 与 Kitty 封面相关的配置项（位于 `config/default.toml`）：
 
 - `kitty_graphics`：启用 Kitty 图形协议渲染（默认：`false`）
-- `kitty_cover_scale_percent`：封面质量百分比（默认：`50`；`100` 表示不下采样）
+- `kitty_cover_scale_percent`：封面质量百分比（默认：`100`；`100` 表示不下采样）
 
 Bars 相关配置项（位于 `config/default.toml`，仅 Bars 模式生效）：
 
 - `super_smooth_bar`：更细的高度分级字符（默认：`false`）
 - `bars_gap`：柱状间隔（默认：`false`）
+- `bar_number`：每侧柱数（`auto`、`16`、`32`、`48`、`64`、`80`、`96`）
+- `bar_channels`：`stereo`（基于单声道数据做中心对称）或 `mono`（低→高从左到右）
+- `bar_channel_reverse`：反转显示方向（mono 左右翻转；stereo 高频在中间、低频在两侧）
+
+柱状布局说明：
+- 开启空格时，柱间距至少为柱宽的一半，并会按可用宽度裁剪柱数。
+- 关闭空格时，保证每个柱子至少占 2 列（最大柱数约为可用宽度的一半）。
+- 柱高使用非线性曲线，避免过快顶到显示上限。
+
+启动设置（位于 `config/default.toml` 中）：
+
+* **`default-opening-folder`**：启动时自动打开一个本地文件夹（默认值：`""`；如果该项缺失或无效，路径将被清除）
 
 歌词/封面与指纹相关配置项（位于 `config/default.toml`）：
 
@@ -206,6 +218,7 @@ Bars 相关配置项（位于 `config/default.toml`，仅 Bars 模式生效）�
 - `lyrics_cover_download`：将获取到的歌词/封面保存到本地（默认：`false`）
 - `audio_fingerprint`：启用音频指纹识别（默认：`false`，需先设置 AcoustID API Key）
 - `acoustid_api_key`：AcoustID API Key（在 Settings 弹窗内填写）
+- `resume_last_position`：启动时从上次退出的本地歌曲位置继续播放（默认：`false`；按文件夹写入 `.order.toml`，精确到秒）
 
 歌词与封面保存位置（启用下载时）：
 

@@ -1,10 +1,8 @@
 use crate::app::mode_manager::ModeManager;
 use crate::app::state::{AppState, CoverSnapshot, LocalFolderKind, Overlay, PlayMode, PlaybackState, RepeatMode};
-use crate::audio::capture::AudioCapture;
-use crate::audio::cava::CavaRunner;
-use crate::audio::spectrum::SpectrumProcessor;
+use crate::audio::cava::{CavaChannels, CavaConfig, CavaRunner};
 use crate::data::theme_loader::ThemeLoader;
-use crate::data::config::VisualizeMode;
+use crate::data::config::{BarChannels, BarNumber, VisualizeMode};
 use crate::ui::tui::{Tui, UiLayout};
 use crate::ui::theme::ThemeName;
 use crate::utils::input::{map_key, map_mouse, Action};
@@ -25,6 +23,88 @@ fn sync_playlists_when_viewing_playback(app: &mut AppState) {
     }
 }
 
+fn clear_spectrum(app: &mut AppState) {
+    let bar_len = app.spectrum.bars.len().max(1);
+    app.spectrum.bars = vec![0.0; bar_len];
+    app.spectrum.bars_left = vec![0.0; bar_len];
+    app.spectrum.bars_right = vec![0.0; bar_len];
+    app.spectrum.stereo_left = [0.0; 64];
+    app.spectrum.stereo_right = [0.0; 64];
+}
+
+fn open_local_folder(app: &mut AppState, mode_manager: &mut ModeManager, folder: &std::path::Path) -> Result<()> {
+    let res = mode_manager.local.load_path(folder)?;
+    mode_manager.pause_other(PlayMode::LocalPlayback);
+    app.player.mode = PlayMode::LocalPlayback;
+    app.playlist = res.playlist;
+    app.playlist_view = app.playlist.clone();
+    app.player.track = res.track;
+    app.player.volume = mode_manager.local.volume();
+    app.player.playback = mode_manager.local.playback_state();
+
+    // Apply persisted EQ to the local player when entering local mode.
+    app.eq.bands_db = app.config.eq_bands_db;
+    let _ = mode_manager.local.set_eq(app.eq);
+
+    app.local_folder = Some(res.playback_folder.clone());
+    app.local_root_folder = Some(res.root_folder);
+    app.local_folder_kind = res.kind;
+    app.local_album_folders = res.album_folders;
+    app.local_view_album_index = res.album_index;
+    app.local_view_album_folder = Some(res.playback_folder);
+
+    app.local_view_album_cover = res.album_cover.as_ref().map(|(b, _)| b.clone());
+    app.local_view_album_cover_hash = res.album_cover.map(|(_, h)| Some(h)).unwrap_or(None);
+
+    if app.config.resume_last_position {
+        if let (Some(folder), Some(cur_path)) = (app.local_folder.as_deref(), app.playlist.current_path().cloned()) {
+            if let Some(sec) = crate::playback::local_player::read_last_position_for_song(folder, &cur_path) {
+                if sec > 0 {
+                    let target = Duration::from_secs(sec);
+                    if mode_manager.local.seek(target).is_ok() {
+                        app.player.position = target;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(cur_path) = app.playlist.current_path().cloned() {
+        app.queue_remote_fetch(Some(&cur_path));
+    }
+
+    // Ensure .order.toml exists and tracks last album/song for local browsing.
+    if app.local_folder_kind == LocalFolderKind::MultiAlbum {
+        if let (Some(root), Some(play_folder)) = (app.local_root_folder.as_deref(), app.local_folder.as_deref()) {
+            let _ = crate::playback::local_player::write_last_album(root, play_folder);
+        }
+    }
+    if let (Some(play_folder), Some(cur_path)) = (app.local_folder.as_deref(), app.playlist.current_path().cloned()) {
+        let _ = crate::playback::local_player::write_last_opened_song(play_folder, &cur_path);
+    }
+
+    Ok(())
+}
+
+fn maybe_open_default_folder(app: &mut AppState, mode_manager: &mut ModeManager) {
+    let raw = app.config.default_opening_folder.trim().to_string();
+    if raw.is_empty() {
+        return;
+    }
+
+    let p = PathBuf::from(&raw);
+    if !p.is_dir() {
+        app.set_toast("Default folder not found; cleared setting");
+        app.config.default_opening_folder.clear();
+        let _ = app.config.save();
+        return;
+    }
+
+    if let Err(e) = open_local_folder(app, mode_manager, &p) {
+        app.set_toast(format!("Default folder error: {e}"));
+    }
+}
+
 pub fn run(app: &mut AppState) -> Result<()> {
     enable_raw_mode()?;
     let mut tui = Tui::new()?;
@@ -32,19 +112,12 @@ pub fn run(app: &mut AppState) -> Result<()> {
 
     let mut mode_manager = ModeManager::new();
 
-    // audio capture (best-effort: try monitor device)
-    let mut audio_capture = AudioCapture::start()?;
-    let mut spectrum = SpectrumProcessor::new(app.config.spectrum_hz, app.spectrum.fft_size);
-
     // Prefer cava for system-wide visualization (keeps our renderer/style; cava only provides bars).
-    // If cava isn't installed, we fall back to the existing internal FFT pipeline.
-    let cava = match CavaRunner::start(app.config.spectrum_hz) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log::warn!("cava unavailable; falling back to internal spectrum: {e}");
-            None
-        }
-    };
+    // If cava isn't installed, we leave the spectrum empty.
+    let mut cava: Option<CavaRunner> = None;
+    let mut cava_cfg: Option<CavaConfig> = None;
+
+    maybe_open_default_folder(app, &mut mode_manager);
 
     let system_volume = SystemVolume::try_new().ok();
 
@@ -52,6 +125,9 @@ pub fn run(app: &mut AppState) -> Result<()> {
     let mut last_mpris = Instant::now();
 
     let mut last_layout = UiLayout::default();
+
+    // Initialize cava with the current desired config (best-effort).
+    ensure_cava(&mut cava, &mut cava_cfg, desired_cava_config(app, &last_layout));
 
     loop {
         let frame_start = Instant::now();
@@ -78,6 +154,13 @@ pub fn run(app: &mut AppState) -> Result<()> {
                 }
                 _ => {}
             }
+        }
+
+        ensure_cava(&mut cava, &mut cava_cfg, desired_cava_config(app, &last_layout));
+
+        if app.config.visualize == VisualizeMode::Bars {
+            let bars = desired_bar_count(app, &last_layout);
+            ensure_bar_buffers(app, bars);
         }
 
         // mpris poll
@@ -145,27 +228,22 @@ pub fn run(app: &mut AppState) -> Result<()> {
                 VisualizeMode::Bars => {
                     if let Some(c) = cava.as_ref() {
                         let (l, r) = c.latest_stereo_bars();
-                        app.spectrum.stereo_left = l;
-                        app.spectrum.stereo_right = r;
+                        app.spectrum.bars_left = l;
+                        app.spectrum.bars_right = r;
                         let raw = c.latest_bars();
-                        app.spectrum.bars = app.spectrum_bar_smoother.apply(raw);
-                        app.spectrum.samples.clear();
+                        app.spectrum.bars = app.spectrum_bar_smoother.apply(&raw);
                     } else {
-                        update_spectrum_from_samples(app, &mut spectrum, &mut mode_manager, &mut audio_capture, frame_start);
+                        clear_spectrum(app);
                     }
                 }
                 VisualizeMode::Oscilloscope => {
                     if let Some(c) = cava.as_ref() {
                         let (l, r) = c.latest_stereo_bars();
-                        app.spectrum.stereo_left = l;
-                        app.spectrum.stereo_right = r;
+                        fill_fixed_bars(&mut app.spectrum.stereo_left, &l);
+                        fill_fixed_bars(&mut app.spectrum.stereo_right, &r);
                         app.spectrum.bars = c.latest_bars();
-                        app.spectrum.samples.clear();
                     } else {
-                        update_spectrum_from_samples(app, &mut spectrum, &mut mode_manager, &mut audio_capture, frame_start);
-                        // Best-effort fallback when cava isn't available.
-                        app.spectrum.stereo_left = app.spectrum.bars;
-                        app.spectrum.stereo_right = app.spectrum.bars;
+                        clear_spectrum(app);
                     }
 
                     let dt = 1.0 / app.config.spectrum_hz.max(1) as f32;
@@ -227,34 +305,6 @@ fn fps_to_dt(fps: u32) -> Duration {
     Duration::from_millis((1000 / fps) as u64)
 }
 
-fn update_spectrum_from_samples(
-    app: &mut AppState,
-    spectrum: &mut SpectrumProcessor,
-    mode_manager: &mut ModeManager,
-    audio_capture: &mut AudioCapture,
-    now: Instant,
-) {
-    if app.player.mode == PlayMode::SystemMonitor && app.player.playback == PlaybackState::Playing {
-        audio_capture.maybe_restart_for_system_playback(now);
-    }
-
-    let samples = if app.player.mode == PlayMode::LocalPlayback {
-        mode_manager.local.latest_samples(app.spectrum.fft_size)
-    } else {
-        audio_capture.latest_samples(app.spectrum.fft_size)
-    };
-
-    // Store samples for visualization (best-effort fallback when cava is unavailable).
-    app.spectrum.samples = samples;
-
-    let bars = if app.spectrum.samples.len() >= app.spectrum.fft_size / 4 {
-        spectrum.process(&app.spectrum.samples)
-    } else {
-        fallback_bars(app.player.volume, app.player.playback)
-    };
-    app.spectrum.bars = bars;
-}
-
 fn handle_local_track_finished(app: &mut AppState, mode_manager: &mut ModeManager) {
     // 自动续播仅用于本地播放。
     if app.player.mode != PlayMode::LocalPlayback {
@@ -312,6 +362,12 @@ fn handle_action(
 ) -> Result<()> {
     match action {
         Action::Quit => {
+            if app.player.mode == PlayMode::LocalPlayback && app.config.resume_last_position {
+                if let (Some(folder), Some(cur_path)) = (app.local_folder.as_deref(), app.playlist.current_path().cloned()) {
+                    let pos = mode_manager.local.position().unwrap_or(app.player.position);
+                    let _ = crate::playback::local_player::write_last_position(folder, &cur_path, pos);
+                }
+            }
             // handled by tui flag
             app.set_toast("Bye");
         }
@@ -387,7 +443,11 @@ fn handle_action(
                 // here just set target
                 app.playlist_slide_target_x = -(layout.left_width as i16);
                 app.overlay = Overlay::None;
-            } else if app.overlay == Overlay::AcoustIdModal || app.overlay == Overlay::BarSettingsModal {
+            } else if app.overlay == Overlay::AcoustIdModal
+                || app.overlay == Overlay::BarSettingsModal
+                || app.overlay == Overlay::LocalAudioSettingsModal
+                || app.overlay == Overlay::AboutModal
+            {
                 app.overlay = Overlay::SettingsModal;
             } else {
                 app.close_overlay();
@@ -436,47 +496,8 @@ fn handle_action(
                         return Ok(());
                     }
                     let p = PathBuf::from(&folder);
-                    match mode_manager.local.load_path(&p) {
-                        Ok(res) => {
-                            mode_manager.pause_other(PlayMode::LocalPlayback);
-                            app.player.mode = PlayMode::LocalPlayback;
-                            app.playlist = res.playlist;
-                            app.playlist_view = app.playlist.clone();
-                            app.player.track = res.track;
-                            app.player.volume = mode_manager.local.volume();
-                            app.player.playback = mode_manager.local.playback_state();
-
-                            // Apply persisted EQ to the local player when entering local mode.
-                            app.eq.bands_db = app.config.eq_bands_db;
-                            let _ = mode_manager.local.set_eq(app.eq);
-
-                            app.local_folder = Some(res.playback_folder.clone());
-                            app.local_root_folder = Some(res.root_folder);
-                            app.local_folder_kind = res.kind;
-                            app.local_album_folders = res.album_folders;
-                            app.local_view_album_index = res.album_index;
-                            app.local_view_album_folder = Some(res.playback_folder);
-
-                            app.local_view_album_cover = res.album_cover.as_ref().map(|(b, _)| b.clone());
-                            app.local_view_album_cover_hash = res.album_cover.map(|(_, h)| Some(h)).unwrap_or(None);
-
-                            if let Some(cur_path) = app.playlist.current_path().cloned() {
-                                app.queue_remote_fetch(Some(&cur_path));
-                            }
-
-                            // Ensure .order.toml exists and tracks last album/song for local browsing.
-                            if app.local_folder_kind == LocalFolderKind::MultiAlbum {
-                                if let (Some(root), Some(play_folder)) = (app.local_root_folder.as_deref(), app.local_folder.as_deref()) {
-                                    let _ = crate::playback::local_player::write_last_album(root, play_folder);
-                                }
-                            }
-                            if let (Some(play_folder), Some(cur_path)) = (app.local_folder.as_deref(), app.playlist.current_path().cloned()) {
-                                let _ = crate::playback::local_player::write_last_opened_song(play_folder, &cur_path);
-                            }
-                        }
-                        Err(e) => {
-                            app.set_toast(format!("Folder error: {e}"));
-                        }
+                    if let Err(e) = open_local_folder(app, mode_manager, &p) {
+                        app.set_toast(format!("Folder error: {e}"));
                     }
                 }
                 Overlay::Playlist => {
@@ -514,34 +535,6 @@ fn handle_action(
                             app.config.album_border = !app.config.album_border;
                             let _ = app.config.save();
                         }
-                        7 => {
-                            app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
-                            let _ = app.config.save();
-                            if app.config.lyrics_cover_fetch {
-                                app.reset_remote_fetch_state();
-                                if app.player.mode == PlayMode::LocalPlayback {
-                                    if let Some(cur_path) = app.playlist.current_path().cloned() {
-                                        app.queue_remote_fetch(Some(&cur_path));
-                                    }
-                                } else if app.player.mode == PlayMode::SystemMonitor {
-                                    app.queue_remote_fetch(None);
-                                }
-                            }
-                        }
-                        8 => {
-                            app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
-                            let _ = app.config.save();
-                        }
-                        9 => {
-                            if !app.config.acoustid_api_key.trim().is_empty() {
-                                app.config.audio_fingerprint = !app.config.audio_fingerprint;
-                                let _ = app.config.save();
-                            }
-                        }
-                        10 => {
-                            app.acoustid_input = app.config.acoustid_api_key.clone();
-                            app.overlay = Overlay::AcoustIdModal;
-                        }
                         3 => {
                             // Visualize mode toggle
                             app.config.visualize = match app.config.visualize {
@@ -562,6 +555,13 @@ fn handle_action(
                                 let _ = app.config.save();
                             }
                         }
+                        7 => {
+                            app.local_audio_settings_selected = 0;
+                            app.overlay = Overlay::LocalAudioSettingsModal;
+                        }
+                        8 => {
+                            app.overlay = Overlay::AboutModal;
+                        }
                         _ => {}
                     }
                 }
@@ -573,6 +573,55 @@ fn handle_action(
                         }
                         1 => {
                             app.config.bars_gap = !app.config.bars_gap;
+                            let _ = app.config.save();
+                        }
+                        2 => {
+                            app.config.bar_number = cycle_bar_number(app.config.bar_number, 1);
+                            let _ = app.config.save();
+                        }
+                        3 => {
+                            app.config.bar_channels = toggle_bar_channels(app.config.bar_channels);
+                            let _ = app.config.save();
+                        }
+                        4 => {
+                            app.config.bar_channel_reverse = !app.config.bar_channel_reverse;
+                            let _ = app.config.save();
+                        }
+                        _ => {}
+                    }
+                }
+                Overlay::LocalAudioSettingsModal => {
+                    match app.local_audio_settings_selected {
+                        0 => {
+                            app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
+                            let _ = app.config.save();
+                            if app.config.lyrics_cover_fetch {
+                                app.reset_remote_fetch_state();
+                                if app.player.mode == PlayMode::LocalPlayback {
+                                    if let Some(cur_path) = app.playlist.current_path().cloned() {
+                                        app.queue_remote_fetch(Some(&cur_path));
+                                    }
+                                } else if app.player.mode == PlayMode::SystemMonitor {
+                                    app.queue_remote_fetch(None);
+                                }
+                            }
+                        }
+                        1 => {
+                            app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
+                            let _ = app.config.save();
+                        }
+                        2 => {
+                            if !app.config.acoustid_api_key.trim().is_empty() {
+                                app.config.audio_fingerprint = !app.config.audio_fingerprint;
+                                let _ = app.config.save();
+                            }
+                        }
+                        3 => {
+                            app.acoustid_input = app.config.acoustid_api_key.clone();
+                            app.overlay = Overlay::AcoustIdModal;
+                        }
+                        4 => {
+                            app.config.resume_last_position = !app.config.resume_last_position;
                             let _ = app.config.save();
                         }
                         _ => {}
@@ -694,18 +743,25 @@ fn handle_action(
         }
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 11;
+                let count = 9;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 2;
+                let count = 5;
                 if app.bar_settings_selected == 0 {
                     app.bar_settings_selected = count - 1;
                 } else {
                     app.bar_settings_selected -= 1;
+                }
+            } else if app.overlay == Overlay::LocalAudioSettingsModal {
+                let count = 5;
+                if app.local_audio_settings_selected == 0 {
+                    app.local_audio_settings_selected = count - 1;
+                } else {
+                    app.local_audio_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
@@ -722,11 +778,14 @@ fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 11;
+                let count = 9;
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 2;
+                let count = 5;
                 app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
+            } else if app.overlay == Overlay::LocalAudioSettingsModal {
+                let count = 5;
+                app.local_audio_settings_selected = (app.local_audio_settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
                 if app.eq_selected < crate::app::state::EQ_BANDS {
@@ -753,8 +812,22 @@ fn handle_action(
                         app.config.bars_gap = !app.config.bars_gap;
                         let _ = app.config.save();
                     }
+                    2 => {
+                        app.config.bar_number = cycle_bar_number(app.config.bar_number, -1);
+                        let _ = app.config.save();
+                    }
+                    3 => {
+                        app.config.bar_channels = toggle_bar_channels(app.config.bar_channels);
+                        let _ = app.config.save();
+                    }
+                    4 => {
+                        app.config.bar_channel_reverse = !app.config.bar_channel_reverse;
+                        let _ = app.config.save();
+                    }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LocalAudioSettingsModal {
+                apply_local_audio_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::app::state::EQ_BANDS;
                 if app.eq_selected == 0 {
@@ -777,8 +850,22 @@ fn handle_action(
                         app.config.bars_gap = !app.config.bars_gap;
                         let _ = app.config.save();
                     }
+                    2 => {
+                        app.config.bar_number = cycle_bar_number(app.config.bar_number, 1);
+                        let _ = app.config.save();
+                    }
+                    3 => {
+                        app.config.bar_channels = toggle_bar_channels(app.config.bar_channels);
+                        let _ = app.config.save();
+                    }
+                    4 => {
+                        app.config.bar_channel_reverse = !app.config.bar_channel_reverse;
+                        let _ = app.config.save();
+                    }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LocalAudioSettingsModal {
+                apply_local_audio_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::app::state::EQ_BANDS;
                 app.eq_selected = (app.eq_selected + 1) % count;
@@ -1104,40 +1191,180 @@ fn apply_settings_delta(app: &mut AppState, delta: i32) {
             app.config.kitty_cover_scale_percent = v as u8;
             let _ = app.config.save();
         }
-        // Lyrics/Cover fetch
-        7 => {
-            if delta != 0 {
-                app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
-                let _ = app.config.save();
-                if app.config.lyrics_cover_fetch {
-                    app.reset_remote_fetch_state();
-                    if app.player.mode == PlayMode::LocalPlayback {
-                        if let Some(cur_path) = app.playlist.current_path().cloned() {
-                            app.queue_remote_fetch(Some(&cur_path));
-                        }
-                    } else if app.player.mode == PlayMode::SystemMonitor {
-                        app.queue_remote_fetch(None);
+        // Local audio settings (Enter opens modal)
+        7 => {}
+        _ => {}
+    }
+}
+
+fn apply_local_audio_settings_delta(app: &mut AppState, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+
+    match app.local_audio_settings_selected {
+        0 => {
+            app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
+            let _ = app.config.save();
+            if app.config.lyrics_cover_fetch {
+                app.reset_remote_fetch_state();
+                if app.player.mode == PlayMode::LocalPlayback {
+                    if let Some(cur_path) = app.playlist.current_path().cloned() {
+                        app.queue_remote_fetch(Some(&cur_path));
                     }
+                } else if app.player.mode == PlayMode::SystemMonitor {
+                    app.queue_remote_fetch(None);
                 }
             }
         }
-        // Lyrics/Cover download
-        8 => {
-            if delta != 0 {
-                app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
-                let _ = app.config.save();
-            }
+        1 => {
+            app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
+            let _ = app.config.save();
         }
-        // Audio fingerprint
-        9 => {
-            if delta != 0 && !app.config.acoustid_api_key.trim().is_empty() {
+        2 => {
+            if !app.config.acoustid_api_key.trim().is_empty() {
                 app.config.audio_fingerprint = !app.config.audio_fingerprint;
                 let _ = app.config.save();
             }
         }
-        // AcoustID API (Enter opens modal)
-        10 => {}
+        3 => {}
+        4 => {
+            app.config.resume_last_position = !app.config.resume_last_position;
+            let _ = app.config.save();
+        }
         _ => {}
+    }
+}
+
+fn cycle_bar_number(cur: BarNumber, delta: i32) -> BarNumber {
+    let options = [
+        BarNumber::Auto,
+        BarNumber::N16,
+        BarNumber::N32,
+        BarNumber::N48,
+        BarNumber::N64,
+        BarNumber::N80,
+        BarNumber::N96,
+    ];
+    let idx = options.iter().position(|v| *v == cur).unwrap_or(0) as i32;
+    let next = (idx + delta).rem_euclid(options.len() as i32) as usize;
+    options[next]
+}
+
+fn toggle_bar_channels(cur: BarChannels) -> BarChannels {
+    match cur {
+        BarChannels::Stereo => BarChannels::Mono,
+        BarChannels::Mono => BarChannels::Stereo,
+    }
+}
+
+fn bar_number_value(n: BarNumber) -> usize {
+    match n {
+        BarNumber::Auto => 64,
+        BarNumber::N16 => 16,
+        BarNumber::N32 => 32,
+        BarNumber::N48 => 48,
+        BarNumber::N64 => 64,
+        BarNumber::N80 => 80,
+        BarNumber::N96 => 96,
+    }
+}
+
+fn auto_bar_number(width_cells: u16, channels: BarChannels) -> usize {
+    if width_cells == 0 {
+        return 64;
+    }
+    let base = match channels {
+        BarChannels::Stereo => (width_cells as usize / 2).max(1),
+        BarChannels::Mono => width_cells as usize,
+    };
+    let options = [16usize, 32, 48, 64, 80, 96];
+    let mut out = 16usize;
+    for v in options {
+        if base >= v {
+            out = v;
+        }
+    }
+    out
+}
+
+fn desired_bar_count(app: &AppState, layout: &UiLayout) -> usize {
+    let raw = match app.config.bar_number {
+        BarNumber::Auto => auto_bar_number(layout.spectrum_rect.width, app.config.bar_channels),
+        v => bar_number_value(v),
+    };
+    let max_total = max_display_bars(layout.spectrum_rect.width, app.config.bars_gap);
+    let max_per_side = match app.config.bar_channels {
+        BarChannels::Stereo => (max_total / 2).max(1),
+        BarChannels::Mono => max_total.max(1),
+    };
+    raw.min(max_per_side).max(1)
+}
+
+fn desired_cava_config(app: &AppState, layout: &UiLayout) -> CavaConfig {
+    match app.config.visualize {
+        VisualizeMode::Bars => {
+            let bars = desired_bar_count(app, layout);
+            CavaConfig {
+                framerate_hz: app.config.spectrum_hz,
+                bars,
+                channels: CavaChannels::Mono,
+                reverse: app.config.bar_channel_reverse,
+            }
+        }
+        VisualizeMode::Oscilloscope => CavaConfig {
+            framerate_hz: app.config.spectrum_hz,
+            bars: 64,
+            channels: CavaChannels::Mono,
+            reverse: app.config.bar_channel_reverse,
+        },
+    }
+}
+
+fn ensure_cava(cava: &mut Option<CavaRunner>, cfg: &mut Option<CavaConfig>, desired: CavaConfig) {
+    if cfg.as_ref() == Some(&desired) {
+        return;
+    }
+
+    match CavaRunner::start(desired) {
+        Ok(c) => {
+            *cava = Some(c);
+            *cfg = Some(desired);
+        }
+        Err(e) => {
+            if cfg.is_none() {
+                log::warn!("cava unavailable; leaving spectrum empty: {e}");
+            }
+            *cava = None;
+            *cfg = None;
+        }
+    }
+}
+
+fn ensure_bar_buffers(app: &mut AppState, bars: usize) {
+    if app.spectrum.bars.len() != bars {
+        app.spectrum.bars = vec![0.0; bars];
+        app.spectrum.bars_left = vec![0.0; bars];
+        app.spectrum.bars_right = vec![0.0; bars];
+        app.spectrum_bar_smoother = crate::audio::smoother::Ema::new(0.35, bars);
+    }
+}
+
+fn max_display_bars(width_cells: u16, gap: bool) -> usize {
+    if width_cells == 0 {
+        return 1;
+    }
+    let w = width_cells as usize;
+    if gap {
+        ((w + 1) / 2).max(1)
+    } else {
+        (w / 2).max(1)
+    }
+}
+
+fn fill_fixed_bars(dst: &mut [f32; 64], src: &[f32]) {
+    for i in 0..64 {
+        dst[i] = src.get(i).copied().unwrap_or(0.0);
     }
 }
 
@@ -1160,24 +1387,4 @@ fn pick_shuffle_index(pl: &crate::data::playlist::Playlist) -> Option<usize> {
     Some(idx)
 }
 
-fn fallback_bars(volume: f32, playback: PlaybackState) -> [f32; 64] {
-    // Best-effort visual fallback when no audio capture is available.
-    // Keep it subtle and animated; scale by volume and playback state.
-    let mut out = [0.0f32; 64];
-    if playback != PlaybackState::Playing {
-        return out;
-    }
-
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f32();
-    let base = (0.15 + 0.60 * volume.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    for i in 0..64 {
-        let x = i as f32 / 64.0;
-        let a = (t * 2.3 + x * 8.0).sin().abs();
-        let b = (t * 1.1 + x * 3.0).cos().abs();
-        out[i] = (base * (0.25 + 0.75 * (0.6 * a + 0.4 * b))).clamp(0.0, 1.0);
-    }
-    out
-}
+// fallback bars removed (leave spectrum empty when unavailable)

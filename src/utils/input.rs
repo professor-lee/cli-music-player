@@ -112,6 +112,18 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
         };
     }
 
+    if overlay == Overlay::LocalAudioSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
     if overlay == Overlay::EqModal {
         // Alt+R: reset EQ to default
         if ev.modifiers.contains(KeyModifiers::ALT) {
@@ -138,6 +150,13 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay) -> Action {
         {
             return Action::CloseOverlay;
         }
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            _ => Action::None,
+        };
+    }
+
+    if overlay == Overlay::AboutModal {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             _ => Action::None,
